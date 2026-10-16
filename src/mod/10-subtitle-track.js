@@ -31,6 +31,8 @@
   const SAVE_DEBOUNCE_MS = 800;
   /** 拿不到观察到的结束时间时，给一句的默认时长 */
   const DEFAULT_CUE_SECONDS = 6;
+  /** 估计时长的下限，避免极短句把进度分母压成 0 */
+  const MIN_CUE_SECONDS = 1;
   /** 重看同一段时判定「同一句」的时间容差 */
   const DEDUPE_WINDOW_SECONDS = 2.5;
 
@@ -123,6 +125,7 @@
       else hi = mid;
     }
     cues.splice(lo, 0, cue);
+    invalidateEstimate();
   }
 
   /** 重看同一段视频时，同一句话会再次出现，别重复收录 */
@@ -143,6 +146,8 @@
     if (t != null) active.end = t;
     if (active.end == null || active.end < active.start) active.end = active.start;
     active = null;
+    // 这一句的时长从此定稿，进了估计时长的样本集合
+    invalidateEstimate();
     scheduleSave();
   }
 
@@ -279,6 +284,7 @@
     active = null;
     lastKey = null;
     lastTickTime = null;
+    invalidateEstimate();
 
     loading = true;
     try {
@@ -319,6 +325,64 @@
     return found;
   }
 
+  /**
+   * 估计「一句大概持续多久」：取已定稿句子的**时长中位数**。
+   *
+   * 为什么是中位数而不是平均值：同一视频里相邻句子的时长相关性很高，中位数对个别
+   * 超长/超短的句子不敏感。
+   *
+   * 为什么排除活跃句：活跃句的 end 是「现在播到哪了」（见 extendActive），
+   * 拿它当时长样本会得出「这一句的时长 = 已经播了多久」，分母于是又跟着 t 跑。
+   *
+   * 结果要缓存：这个函数在 getProgress() 的路径上，而浮窗与面板是每帧调一次
+   * （60fps × 几千句的排序 = 白烧 CPU）。样本集合只在「建句 / 句子定稿 / 换视频 / 清空」
+   * 时变化，所以在那几处失效即可。
+   */
+  let estimateCache = null;
+
+  function invalidateEstimate() {
+    estimateCache = null;
+  }
+
+  function estimatedSeconds() {
+    if (estimateCache != null) return estimateCache;
+
+    const spans = [];
+    for (const cue of cues) {
+      if (cue === active) continue;
+      if (cue.end == null || cue.end <= cue.start) continue;
+      spans.push(cue.end - cue.start);
+    }
+
+    let value = DEFAULT_CUE_SECONDS;
+    if (spans.length) {
+      spans.sort((a, b) => a - b);
+      const mid = spans.length >> 1;
+      const median = spans.length % 2 ? spans[mid] : (spans[mid - 1] + spans[mid]) / 2;
+      value = Math.max(MIN_CUE_SECONDS, median);
+    }
+
+    estimateCache = value;
+    return value;
+  }
+
+  /**
+   * 进度条的分母 —— 这一句「预计播到哪儿」。
+   *
+   * ⚠️ 不能用 resolveEnd()。resolveEnd 优先取 cue.end，而活跃句的 cue.end 会被
+   * extendActive() 一路推到当前播放位置，于是
+   *
+   *     进度 = (t - start) / (cue.end - start) = (t - start) / (t - start) = 1
+   *
+   * 每句开始不到一秒就顶到 100%，这正是「进度是错的」。cue.end 的既有语义
+   * （SRT 导出时"这句显示到哪一刻"）保持不变，这里只是换一个口径而已。
+   */
+  function progressEnd(cue, next) {
+    if (next) return next.start;
+    if (cue !== active && cue.end != null && cue.end > cue.start) return cue.end;
+    return cue.start + estimatedSeconds();
+  }
+
   /** 补出每句的结束时间：优先用观察到的 end，其次用下一句的 start */
   function resolveEnd(cue, next) {
     let end = cue.end;
@@ -337,13 +401,21 @@
     return { ...cue, end: resolveEnd(cue, next), index, next };
   }
 
+  /** 当前句的进度分母（测试与诊断用，语义见 progressEnd） */
+  function getProgressEnd() {
+    const index = indexAt();
+    if (index < 0) return null;
+    return progressEnd(cues[index], cues[index + 1] ?? null);
+  }
+
   function getProgress() {
     const t = currentTime();
-    const cur = getCurrent();
-    if (t == null || !cur) return 0;
-    const span = cur.end - cur.start;
+    const index = indexAt(t);
+    if (t == null || index < 0) return 0;
+    const start = cues[index].start;
+    const span = progressEnd(cues[index], cues[index + 1] ?? null) - start;
     if (!(span > 0)) return 0;
-    return Math.max(0, Math.min(1, (t - cur.start) / span));
+    return Math.max(0, Math.min(1, (t - start) / span));
   }
 
   /** 导出用：全部句子，end 已补齐，空句已剔除 */
@@ -362,6 +434,7 @@
     cues = [];
     active = null;
     lastKey = null;
+    invalidateEstimate();
     const key = storeKey();
     if (key) {
       try {
@@ -394,6 +467,7 @@
     getCues: () => cues,
     getCurrent,
     getProgress,
+    getProgressEnd,
     getCuesForExport: finalizedCues,
     getMeta: () => (meta ? { ...meta } : null),
     getVideoTime: currentTime,

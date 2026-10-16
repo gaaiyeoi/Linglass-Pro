@@ -41,8 +41,10 @@ async function sourceOf(file) {
  *
  * @param {object} [options]
  * @param {boolean} [options.withPanel] 是否额外加载 40-study-panel.js
+ * @param {boolean} [options.withPip]   是否额外加载 30-desktop-subtitles.js
+ * @param {object}  [options.stored]    预置的 chrome.storage.local 内容
  */
-async function harness({ withPanel = false } = {}) {
+async function harness({ withPanel = false, withPip = false, stored = {} } = {}) {
   const h = {
     // 字幕浮层 Shadow DOM 的可控状态
     primary: '',
@@ -56,10 +58,21 @@ async function harness({ withPanel = false } = {}) {
     // 落盘与定时器
     saved: [],
     removed: [],
+    stored,
     features: [],
     timers: new Map(),
     intervals: [],
     mutationCallback: null,
+    // 页面可见性（桌面字幕的「切回浏览器」判定靠它）
+    visibilityState: 'visible',
+    docListeners: {},
+    listeners(type) {
+      if (!h.docListeners[type]) h.docListeners[type] = [];
+      return h.docListeners[type];
+    },
+    // 系统级画中画
+    pip: { window: null, windows: [], requestCount: 0, deny: false, lastOptions: null },
+    jaBreakEnabled: true,
   };
 
   let timerId = 0;
@@ -116,6 +129,65 @@ async function harness({ withPanel = false } = {}) {
 
   const host = { shadowRoot: subtitleRoot };
 
+  /**
+   * 画中画窗口的假货。
+   *
+   * 30-desktop-subtitles.js 只用到极小的一个子集：createElement / append /
+   * getElementById（按 id 找它刚建好的那些节点）、addEventListener('pagehide')、
+   * close()、requestAnimationFrame。所以这里不求完整 DOM，只保证这五件事成立。
+   */
+  function fakePipDocument() {
+    const byId = new Map();
+    const el = (tagName) => ({
+      tagName,
+      id: '',
+      className: '',
+      style: {},
+      textContent: '',
+      children: [],
+      append(...kids) {
+        for (const kid of kids) {
+          this.children.push(kid);
+          if (kid && kid.id) byId.set(kid.id, kid);
+        }
+      },
+    });
+    return {
+      documentElement: { style: {} },
+      head: el('head'),
+      body: el('body'),
+      createElement: (tagName) => el(tagName),
+      getElementById: (id) => byId.get(id) ?? null,
+    };
+  }
+
+  function makePipWindow() {
+    const win = {
+      document: fakePipDocument(),
+      closed: false,
+      innerWidth: 1000,
+      innerHeight: 220,
+      handlers: {},
+      addEventListener(type, fn) {
+        if (!win.handlers[type]) win.handlers[type] = [];
+        win.handlers[type].push(fn);
+      },
+      removeEventListener() {},
+      requestAnimationFrame: () => 0,
+      cancelAnimationFrame: () => {},
+      /** 模拟 UA 关闭：只发 pagehide，不经过我们的 close() */
+      fire(type) {
+        for (const fn of [...(win.handlers[type] || [])]) fn();
+      },
+      close() {
+        win.closed = true;
+        if (h.pip.window === win) h.pip.window = null;
+        win.fire('pagehide');
+      },
+    };
+    return win;
+  }
+
   const sandbox = {
     console,
     URL,
@@ -123,7 +195,7 @@ async function harness({ withPanel = false } = {}) {
     confirm: () => true,
     requestAnimationFrame: () => 0,
     cancelAnimationFrame: () => {},
-    location: { href: WATCH_URL },
+    location: { href: WATCH_URL, pathname: '/watch' },
     document: {
       title: 'テスト動画 - YouTube',
       head: { append: () => {} },
@@ -133,12 +205,20 @@ async function harness({ withPanel = false } = {}) {
         selector === '#movie_player video' ? video : null,
       querySelectorAll: () => [],
       createElement: () => ({ style: {}, append: () => {}, remove: () => {} }),
-      addEventListener: () => {},
+      addEventListener: (type, fn) => h.listeners(type).push(fn),
+      removeEventListener: (type, fn) => {
+        const list = h.listeners(type);
+        const index = list.indexOf(fn);
+        if (index >= 0) list.splice(index, 1);
+      },
+      get visibilityState() {
+        return h.visibilityState;
+      },
     },
     chrome: {
       storage: {
         local: {
-          get: (key) => Promise.resolve({}),
+          get: () => Promise.resolve(h.stored),
           set: (entry) => {
             h.saved.push(entry);
             return Promise.resolve();
@@ -182,6 +262,29 @@ async function harness({ withPanel = false } = {}) {
     listFeatures: () => h.features,
   };
 
+  // 15-ja-break.js 的桩：桌面字幕只跟它要「开关状态」和「分隔符长什么样」。
+  // 不加载真模块 —— 它要往官方字幕 shadowRoot 里写东西，桩件沙箱里没有那套结构。
+  sandbox.__llgModJaBreak = {
+    isEnabled: () => h.jaBreakEnabled,
+    SEPARATOR: '|',
+  };
+
+  sandbox.documentPictureInPicture = {
+    get window() {
+      return h.pip.window;
+    },
+    requestWindow(options) {
+      h.pip.requestCount += 1;
+      h.pip.lastOptions = options;
+      // 没有瞬时用户激活 → 真实现会 reject
+      if (h.pip.deny) return Promise.reject(new Error('NotAllowedError'));
+      const win = makePipWindow();
+      h.pip.window = win;
+      h.pip.windows.push(win);
+      return Promise.resolve(win);
+    },
+  };
+
   h.tick = () => {
     for (const fn of h.intervals) fn();
   };
@@ -194,6 +297,26 @@ async function harness({ withPanel = false } = {}) {
     // 让微任务队列跑干净（save()/flush() 都是 async）
     for (let i = 0; i < 8; i += 1) await Promise.resolve();
   };
+  /** 触发一次用户手势（桌面字幕靠它拿到瞬时激活） */
+  h.gesture = (type = 'pointerdown') => {
+    for (const fn of [...h.listeners(type)]) fn();
+  };
+  /** 切换页面可见性并广播 visibilitychange */
+  h.setVisibility = (state) => {
+    h.visibilityState = state;
+    for (const fn of [...h.listeners('visibilitychange')]) fn();
+  };
+  h.lastPipWindow = () => h.pip.windows[h.pip.windows.length - 1] || null;
+  h.pipText = () => {
+    const win = h.lastPipWindow();
+    const line = win && win.document.getElementById('line-primary');
+    return line ? line.textContent : null;
+  };
+  h.pipFill = () => {
+    const win = h.lastPipWindow();
+    const fill = win && win.document.getElementById('fill-primary');
+    return fill ? fill.style.width : null;
+  };
 
   vm.runInContext(await sourceOf('05-ja-segment.js'), sandbox, {
     filename: '05-ja-segment.js',
@@ -201,6 +324,11 @@ async function harness({ withPanel = false } = {}) {
   vm.runInContext(await sourceOf('10-subtitle-track.js'), sandbox, {
     filename: '10-subtitle-track.js',
   });
+  if (withPip) {
+    vm.runInContext(await sourceOf('30-desktop-subtitles.js'), sandbox, {
+      filename: '30-desktop-subtitles.js',
+    });
+  }
   if (withPanel) {
     vm.runInContext(await sourceOf('40-study-panel.js'), sandbox, {
       filename: '40-study-panel.js',
@@ -268,22 +396,65 @@ test('字幕轨道：字幕空档期只收尾、不建空句', async () => {
   assert.equal(track.getCues()[0].end, 8);
 });
 
-test('字幕轨道：句内进度按线性插值，暂停时不推进', async () => {
+/**
+ * 进度分母的回归测试。
+ *
+ * 旧实现拿 resolveEnd()（= 活跃句被 extendActive 推上去的 cue.end）当分母，
+ * 于是 (t - start) / (t - start) 恒等于 1：每句开始不到一秒进度就顶到 100%。
+ * 旧版本的这条用例之所以是绿的，是因为它手动把 currentTime 倒回了句中（真实播放不会倒回）。
+ */
+test('字幕轨道：活跃句的 end 不再吞掉进度分母', async () => {
   const { h, track } = await harness();
 
   h.currentTime = 10;
   show(h, 'テスト', '测试');
+
+  // 真实播放：心跳每秒把 end 推到当前播放位置
   h.currentTime = 12;
   h.tick();
   assert.equal(track.getCues()[0].end, 12);
 
-  h.currentTime = 11;
-  assert.equal(track.getProgress(), 0.5, '11s 处于 10→12 的中点');
+  h.currentTime = 13;
+  h.tick();
+  assert.equal(track.getCues()[0].end, 13, '同句持续时 end 应该跟着播放前进（SRT 导出的语义）');
+
+  assert.equal(track.getProgressEnd(), 16, '分母 = 起点 + 估计时长（首句无样本 → 6s）');
+  assert.equal(track.getProgress(), 0.5, '播到 13s 时是 10→16 的中点，而不是 100%');
 
   // 暂停：currentTime 不动，end 不能被无限拉长（否则进度条会倒退）
   h.tick();
   h.tick();
-  assert.equal(track.getCues()[0].end, 12, '暂停时 end 必须保持不动');
+  assert.equal(track.getCues()[0].end, 13, '暂停时 end 必须保持不动');
+  assert.equal(track.getProgress(), 0.5, '暂停时进度也不动');
+});
+
+test('字幕轨道：有下一句时，进度分母用下一句的起点', async () => {
+  const { h, track } = await harness();
+
+  h.currentTime = 10;
+  show(h, 'あ', '啊');
+  h.currentTime = 12;
+  show(h, 'い', '咿'); // 换句 → 第一句定稿
+
+  h.currentTime = 11; // 用户在句内
+  assert.equal(track.getProgressEnd(), 12, '分母应当是下一句的 start');
+  assert.equal(track.getProgress(), 0.5, '11s 处于 10→12 的中点');
+});
+
+test('字幕轨道：估计时长取已定稿句子的中位数，且不含活跃句', async () => {
+  const { h, track } = await harness();
+
+  h.currentTime = 0;
+  show(h, 'a', '');
+  h.currentTime = 2;
+  show(h, 'b', ''); // a: 0→2，时长 2
+  h.currentTime = 6;
+  show(h, 'c', ''); // b: 2→6，时长 4
+
+  h.currentTime = 12;
+  h.tick(); // c 成为活跃句，它的 end 是「播到哪了」，不能当时长样本
+
+  assert.equal(track.getProgressEnd(), 9, '中位数 (2 + 4) / 2 = 3 → 6 + 3');
 });
 
 test('字幕轨道：未进入任何句子时进度为 0', async () => {
@@ -458,6 +629,167 @@ test('学习面板：把功能登记进设置面板注册表', async () => {
   for (const action of feature.actions) {
     assert.ok(action.id && action.title && action.icon, '操作行必须有 id / 标题 / 图标');
   }
+});
+
+// ---------------------------------------------------------------- 桌面字幕常驻
+
+test('桌面字幕：默认开启，但要等第一次用户手势才真正开窗', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  assert.equal(pip.isEnabled(), true, '没表过态时默认就是开着的');
+  assert.equal(pip.isOpen(), false);
+  assert.equal(h.pip.requestCount, 0, 'requestWindow 要瞬时用户激活，加载时不能硬开');
+
+  h.gesture();
+  await h.drain();
+
+  assert.equal(h.pip.requestCount, 1);
+  assert.equal(pip.isOpen(), true);
+  assert.equal(h.pip.lastOptions.disallowReturnToOpener, true, '不给「返回标签页」按钮');
+  assert.equal(h.saved.at(-1).llgPip.enabled, true, '常驻开关要落盘');
+});
+
+test('桌面字幕：切回浏览器时被 UA 关掉，会自己回来', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+  const first = h.lastPipWindow();
+
+  h.setVisibility('hidden');
+  h.setVisibility('visible'); // 用户切回浏览器（hidden → visible 的跃迁）
+  first.fire('pagehide');     // UA 就在这一刻把它关了
+  await h.drain();
+
+  assert.equal(h.pip.requestCount, 2, '应当立刻重开一次');
+  assert.equal(pip.isOpen(), true);
+  assert.equal(pip.isEnabled(), true, '这次不是用户关的，开关要保持开着');
+});
+
+test('桌面字幕：显式关闭之后不再自动弹回来', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+
+  pip.close(); // 用户点了控制栏里的「关闭桌面字幕」
+  await h.drain();
+
+  assert.equal(pip.isEnabled(), false);
+  assert.equal(pip.isOpen(), false);
+  assert.equal(h.saved.at(-1).llgPip.enabled, false, '关掉也要落盘');
+
+  h.gesture();
+  await h.drain();
+  assert.equal(h.pip.requestCount, 1, '关掉之后任何手势都不许再开');
+});
+
+test('桌面字幕：用户点 PiP 窗口自己的 X 也算显式关闭', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+
+  // 页面一直可见 → 不是「切回浏览器」那种关闭，而是用户自己关的
+  h.lastPipWindow().fire('pagehide');
+  await h.drain();
+
+  assert.equal(pip.isEnabled(), false);
+  assert.equal(h.pip.requestCount, 1, '不该自己弹回来');
+});
+
+test('桌面字幕：恢复时没有用户手势，就等到下一次手势', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+
+  h.pip.deny = true; // 模拟 requestWindow 被拒（此刻没有瞬时激活）
+  h.setVisibility('hidden');
+  h.setVisibility('visible');
+  h.lastPipWindow().fire('pagehide');
+  await h.drain();
+
+  assert.equal(pip.isOpen(), false);
+  assert.equal(h.pip.requestCount, 2, '会先试一次');
+
+  h.pip.deny = false;
+  h.gesture(); // 下一次手势把它接住
+  await h.drain();
+
+  assert.equal(pip.isOpen(), true);
+  assert.equal(h.pip.requestCount, 3);
+});
+
+test('桌面字幕：落盘里关掉的开关，下次加载不会被重新打开', async () => {
+  const { sandbox, h } = await harness({
+    withPip: true,
+    stored: { llgPip: { enabled: false } },
+  });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+
+  assert.equal(pip.isEnabled(), false);
+
+  h.gesture();
+  await h.drain();
+  assert.equal(h.pip.requestCount, 0, '用户明确关过的东西不许自作主张打开');
+});
+
+// ---------------------------------------------------------------- 浮窗的进度与分隔符
+
+const SEGMENTED = '昨日\u2009|\u2009買った\u2009|\u2009本を\u2009|\u2009読む';
+
+test('桌面字幕：原文行按文节插分隔符，并跟随视频内断句的开关', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  assert.equal(pip.displayPrimary('昨日買った本を読む'), SEGMENTED);
+
+  h.jaBreakEnabled = false;
+  assert.equal(pip.displayPrimary('昨日買った本を読む'), '昨日買った本を読む', '断句关着就不插');
+  assert.equal(pip.displayPrimary('hello world'), 'hello world', '非日语原样放过');
+  assert.equal(pip.displayPrimary(''), '');
+});
+
+test('桌面字幕：浮窗原文行真的带上了分隔符', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+
+  h.currentTime = 5;
+  show(h, '昨日買った本を読む', '昨天买的书');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+
+  assert.equal(h.pipText(), SEGMENTED);
+
+  // 中途关掉视频内的断句 → 心跳把浮窗重绘成干净原文（去重键里带了开关状态）
+  h.jaBreakEnabled = false;
+  h.tick();
+  assert.equal(h.pipText(), '昨日買った本を読む');
+  assert.equal(sandbox.__llgModPip.isOpen(), true);
+});
+
+test('桌面字幕：浮窗进度条按新的分母走', async () => {
+  const { h } = await harness({ withPip: true });
+
+  h.currentTime = 10;
+  show(h, 'テスト', '测试');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+  assert.equal(h.pipFill(), '0%', '刚开窗时还没播');
+
+  h.currentTime = 13;
+  h.tick();
+  assert.equal(h.pipFill(), '50%', '3 / 6，而不是旧实现的 100%');
 });
 
 /**
