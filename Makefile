@@ -16,10 +16,11 @@ DIST     := dist
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build dev open check vendor-update vendor-from clean
+.PHONY: help build test dev open check vendor-update vendor-from clean
 
 help:
 	@echo "make build                        构建 dist/（正式版）"
+	@echo "make test                         跑契约测试与逻辑冒烟测试"
 	@echo "make dev                          监听 src/ 自动重建 + 自动重载（开发用）"
 	@echo "make open                         打开 Arc 扩展管理页（arc://extensions）"
 	@echo "make check                        检查 dist/ 是否已正确注入 mod 脚本"
@@ -28,6 +29,10 @@ help:
 
 build:
 	node build.mjs
+
+# 只用 node:test，无第三方依赖。契约测试要读 vendor/，所以先跑 make vendor-update。
+test:
+	node --test tools/test/*.test.mjs
 
 dev:
 	node tools/dev.mjs
