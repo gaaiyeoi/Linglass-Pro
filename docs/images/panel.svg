@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500" role="img"
+     aria-label="学习面板的两种挂载形态：watch 页寄生在 YouTube 推荐列里，其它页面右侧悬浮并让页面让位">
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+           "Noto Sans CJK SC", system-ui, sans-serif; }
+    .t     { font-size: 15px; font-weight: 600; fill: #1f2328; }
+    .win   { fill: #ffffff; stroke: #d8dee4; stroke-width: 1.5; }
+    .chrome{ fill: #f6f8fa; }
+    .dot   { fill: #d0d7de; }
+    .stage { fill: #1f2328; }
+    .staget{ fill: #8b949e; font-size: 12.5px; }
+    .col   { fill: #f6f8fa; stroke: #e4e8ec; stroke-width: 1.2; }
+    .colcap{ font-size: 10.5px; fill: #6e7781; }
+    .hl    { fill: #edf4ff; stroke: #a8c7ee; stroke-width: 1.5; }
+    .dark  { fill: #15171c; }
+    .darkt { font-size: 12px; fill: #e8eaed; }
+    .onlight { font-size: 12px; fill: #1f2328; }
+    .ondark  { font-size: 12px; fill: #8b949e; }
+    .d     { font-size: 12px; fill: #57606a; }
+    .cap   { font-size: 12.5px; fill: #57606a; }
+    .pill  { fill: #f6f8fa; stroke: #d8dee4; stroke-width: 1.2; }
+    .pt    { font-size: 11.5px; fill: #57606a; }
+    .ph    { fill: #e4e8ec; }
+    .cut   { stroke: #d0d7de; stroke-width: 1.2; stroke-dasharray: 4 4; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="499" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
+  <text class="t" x="30" y="46">学习面板 —— 两种挂载形态</text>
+
+  <!-- 形态一：watch 页，寄生进推荐列 -->
+  <rect class="win" x="30" y="68" width="430" height="332" rx="12"/>
+  <path class="chrome" d="M30 80 a12 12 0 0 1 12-12 h406 a12 12 0 0 1 12 12 v16 h-430 z"/>
+  <circle class="dot" cx="48" cy="82" r="3.5"/>
+  <circle class="dot" cx="60" cy="82" r="3.5"/>
+  <circle class="dot" cx="72" cy="82" r="3.5"/>
+
+  <rect class="stage" x="46" y="110" width="268" height="160" rx="8"/>
+  <text class="staget" x="180" y="186" text-anchor="middle">YouTube 播放页</text>
+  <text class="staget" x="180" y="206" text-anchor="middle">（官方字幕渲染在播放器上）</text>
+
+  <rect class="col" x="326" y="110" width="118" height="274" rx="8"/>
+  <text class="colcap" x="336" y="128">#columns #secondary</text>
+  <text class="colcap" x="336" y="142">YouTube 的推荐列</text>
+  <rect class="hl" x="334" y="152" width="102" height="120" rx="6"/>
+  <text class="onlight" x="385" y="205" text-anchor="middle">学习面板</text>
+  <text class="d" x="385" y="225" text-anchor="middle">寄生在这里</text>
+  <text class="d" x="385" y="243" text-anchor="middle">宽度由列决定</text>
+  <rect class="ph" x="334" y="286" width="102" height="10" rx="4"/>
+  <rect class="ph" x="334" y="304" width="102" height="10" rx="4"/>
+  <rect class="ph" x="334" y="322" width="102" height="10" rx="4"/>
+  <rect class="ph" x="334" y="340" width="102" height="10" rx="4"/>
+
+  <text class="cap" x="30" y="428">watch 页：面板插进推荐列，宽度交给 YouTube 自己算 —— 不遮挡任何东西。</text>
+
+  <!-- 形态二：其它页面，右侧悬浮 + 让位 -->
+  <rect class="win" x="500" y="68" width="430" height="332" rx="12"/>
+  <path class="chrome" d="M500 80 a12 12 0 0 1 12-12 h406 a12 12 0 0 1 12 12 v16 h-430 z"/>
+  <circle class="dot" cx="518" cy="82" r="3.5"/>
+  <circle class="dot" cx="530" cy="82" r="3.5"/>
+  <circle class="dot" cx="542" cy="82" r="3.5"/>
+
+  <rect class="col" x="516" y="110" width="270" height="274" rx="8"/>
+  <text class="staget" x="651" y="200" text-anchor="middle">首页 / 搜索页</text>
+  <text class="staget" x="651" y="220" text-anchor="middle">（没有推荐列可寄生）</text>
+  <text class="colcap" x="530" y="146">页面被挤窄</text>
+  <text class="colcap" x="530" y="162">宽度写进 --llg-panel-w</text>
+
+  <line class="cut" x1="790" y1="110" x2="790" y2="384"/>
+  <rect class="dark" x="798" y="110" width="120" height="274" rx="8"/>
+  <text class="darkt" x="858" y="240" text-anchor="middle">学习面板</text>
+  <text class="ondark" x="858" y="262" text-anchor="middle">右侧悬浮</text>
+  <text class="ondark" x="858" y="282" text-anchor="middle">全屏时自动收起</text>
+
+  <text class="cap" x="500" y="428">其它页面：右侧悬浮 + 让页面让位；面板宽度可拖 300–760px。</text>
+
+  <!-- 能力清单 -->
+  <rect class="pill" x="30" y="452" width="118" height="30" rx="15"/>
+  <text class="pt" x="44" y="472">实时双语字幕</text>
+  <rect class="pill" x="160" y="452" width="118" height="30" rx="15"/>
+  <text class="pt" x="174" y="472">逐句点击跳转</text>
+  <rect class="pill" x="290" y="452" width="170" height="30" rx="15"/>
+  <text class="pt" x="304" y="472">导出 Markdown / SRT</text>
+  <rect class="pill" x="472" y="452" width="118" height="30" rx="15"/>
+  <text class="pt" x="486" y="472">复制到剪贴板</text>
+  <rect class="pill" x="602" y="452" width="168" height="30" rx="15"/>
+  <text class="pt" x="616" y="472">宽度可拖 300–760px</text>
+  <rect class="pill" x="782" y="452" width="148" height="30" rx="15"/>
+  <text class="pt" x="796" y="472">记住宽度 / 开关状态</text>
+</svg>

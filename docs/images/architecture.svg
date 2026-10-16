@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="470" viewBox="0 0 960 470" role="img"
+     aria-label="构建流程：官方只读基线与 src/mod 增量代码，经 build.mjs 叠加成可加载的 dist/">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#8b949e"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+           "Noto Sans CJK SC", system-ui, sans-serif; }
+    .card { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .ours { fill: #edf4ff; stroke: #a8c7ee; stroke-width: 1.5; }
+    .out  { fill: #f1fbf4; stroke: #a7d7b4; stroke-width: 1.5; }
+    .t    { font-size: 15px; font-weight: 600; fill: #1f2328; }
+    .d    { font-size: 12.5px; fill: #57606a; }
+    .m    { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 13.5px; fill: #1f2328; }
+    .mm   { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11.5px; fill: #57606a; }
+    .hd   { font-size: 11.5px; font-weight: 600; fill: #6e7781; letter-spacing: .12em; }
+    .pt   { font-size: 11.5px; fill: #57606a; }
+    .pill { fill: #ffffff; stroke: #d8dee4; }
+    .ln   { stroke: #8b949e; stroke-width: 1.5; fill: none; }
+    .div  { stroke: #e4e8ec; stroke-width: 1.5; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="469" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
+
+  <text class="hd" x="34" y="52">① 两个来源</text>
+  <text class="hd" x="392" y="52">② 构建</text>
+  <text class="hd" x="672" y="52">③ 可加载产物</text>
+
+  <!-- vendor -->
+  <rect class="card" x="30" y="76" width="300" height="140" rx="12"/>
+  <text class="m" x="50" y="108">vendor/linglass-1.12.3/</text>
+  <text class="d" x="50" y="134">商店下发的官方扩展 · 只读基线</text>
+  <text class="d" x="50" y="156">一个字节都不改，整份复制进产物</text>
+  <rect class="pill" x="50" y="172" width="150" height="24" rx="12"/>
+  <text class="pt" x="62" y="188">不进版本控制（.gitignore）</text>
+
+  <!-- src/mod -->
+  <rect class="ours" x="30" y="250" width="300" height="140" rx="12"/>
+  <text class="m" x="50" y="282">src/mod/</text>
+  <text class="d" x="50" y="308">我们的全部代码 · 增量叠加</text>
+  <text class="d" x="50" y="330">数字前缀 = 注入顺序</text>
+  <rect class="pill" x="50" y="346" width="150" height="24" rx="12"/>
+  <text class="pt" x="62" y="362">git diff 里只有我们的代码</text>
+
+  <!-- build.mjs -->
+  <rect class="card" x="380" y="76" width="240" height="314" rx="12"/>
+  <text class="m" x="400" y="108">build.mjs</text>
+  <line class="div" x1="400" y1="122" x2="600" y2="122"/>
+  <text class="d" x="400" y="150">① 契约校验</text>
+  <text class="pt" x="412" y="170">官方字幕 DOM 记号还在不在</text>
+  <text class="d" x="400" y="200">② 复制基线</text>
+  <text class="pt" x="412" y="220">vendor/ → dist/</text>
+  <text class="d" x="400" y="250">③ 叠加增量</text>
+  <text class="pt" x="412" y="270">mod/* 与 manifest.json</text>
+  <text class="d" x="400" y="300">④ 注入自检</text>
+  <text class="pt" x="412" y="320">顺序是否如预期 / SW 有没有泄漏</text>
+  <rect class="pill" x="400" y="342" width="200" height="26" rx="13"/>
+  <text class="pt" x="412" y="359">make build · make dev 自动重载</text>
+
+  <!-- dist -->
+  <rect class="out" x="660" y="76" width="270" height="314" rx="12"/>
+  <text class="m" x="680" y="108">dist/</text>
+  <text class="d" x="680" y="134">可加载的完整扩展</text>
+  <line class="div" x1="680" y1="150" x2="910" y2="150"/>
+  <text class="d" x="680" y="178">版本号 <tspan class="mm">x.y.900</tspan>（避开商店号段）</text>
+  <text class="d" x="680" y="206">加载：开发者模式 →</text>
+  <text class="d" x="680" y="228">「加载已解压的扩展程序」→ 选 dist/</text>
+  <line class="div" x1="680" y1="248" x2="910" y2="248"/>
+  <text class="d" x="680" y="276">make check</text>
+  <text class="pt" x="692" y="296">校验产物里真的注入了 mod 脚本</text>
+  <text class="d" x="680" y="326">make dev</text>
+  <text class="pt" x="692" y="346">改代码自动重建，扩展自动重载</text>
+  <text class="pt" x="680" y="374">官方一改版，构建阶段就告警</text>
+
+  <!-- arrows -->
+  <path class="ln" d="M330 130 C356 130 356 176 378 176" marker-end="url(#arrow)"/>
+  <path class="ln" d="M330 304 C356 304 356 258 378 258" marker-end="url(#arrow)"/>
+  <path class="ln" d="M620 233 H 654" marker-end="url(#arrow)"/>
+
+  <text class="pt" x="30" y="440">官方基线与我们的代码永不混合：vendor/ 不进版本控制，dist/ 是生成物（同样被忽略）。</text>
+</svg>

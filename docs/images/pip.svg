@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img"
+     aria-label="桌面字幕浮窗示意：双语字幕、可选文节分隔符、句内进度条与播放控制栏">
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+           "Noto Sans CJK SC", system-ui, sans-serif; }
+    .t    { font-size: 15px; font-weight: 600; fill: #1f2328; }
+    .note { font-size: 12.5px; fill: #57606a; }
+    .bar  { fill: #15171c; stroke: #2c313a; stroke-width: 1.5; }
+    .tip  { font-size: 11.5px; fill: #7f8c9b; }
+    .btn  { fill: #23272e; stroke: #333941; stroke-width: 1.2; }
+    .bt   { font-size: 11.5px; fill: #c9d1d9; }
+    .time { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12px; fill: #8b949e; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="429" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
+
+  <text class="t" x="30" y="44">桌面字幕浮窗（系统级画中画）</text>
+  <text class="note" x="270" y="44">—— 浏览器最小化、切到别的应用之后，字幕仍留在桌面上</text>
+
+  <rect class="bar" x="60" y="76" width="840" height="278" rx="14"/>
+  <text class="tip" x="84" y="104">桌面字幕</text>
+  <path d="M862 92 L874 104 M874 92 L862 104" stroke="#6b7280" stroke-width="1.6" fill="none"/>
+  <line x1="60" y1="118" x2="900" y2="118" stroke="#262b33" stroke-width="1.5"/>
+
+  <!-- 原文行（含注音 + 文节分隔符） -->
+  <text class="tip" x="100" y="164">きのう</text>
+  <text x="100" y="196" font-size="30" fill="#e8eaed">昨日</text>
+  <line x1="172" y1="172" x2="172" y2="200" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="184" y="196" font-size="30" fill="#e8eaed">買った</text>
+  <line x1="286" y1="172" x2="286" y2="200" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="298" y="196" font-size="30" fill="#e8eaed">本を</text>
+  <line x1="370" y1="172" x2="370" y2="200" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="382" y="196" font-size="30" fill="#e8eaed">読む</text>
+
+  <text class="tip" x="500" y="176">← 注音跟随官方设置（官方关着就是纯净原文）</text>
+  <text class="tip" x="500" y="196">← 文节分隔符是可选开关，不往文本里塞字符</text>
+
+  <!-- 译文行 -->
+  <text x="100" y="234" font-size="18" fill="#aab4c2">读昨天买的书。</text>
+  <text class="tip" x="290" y="234">← 样式 / 字号 / 颜色 / 双语开关都照搬官方「外观」</text>
+
+  <!-- 句内进度 -->
+  <text class="tip" x="640" y="252">句内进度：句级时间轴 + 线性插值</text>
+  <rect x="100" y="262" width="760" height="6" rx="3" fill="#2b3038"/>
+  <rect x="100" y="262" width="292" height="6" rx="3" fill="#7db3f0"/>
+
+  <!-- 播放控制栏 -->
+  <rect class="btn" x="100" y="298" width="76" height="28" rx="8"/>
+  <text class="bt" x="138" y="317" text-anchor="middle">上一句</text>
+  <rect class="btn" x="186" y="298" width="92" height="28" rx="8"/>
+  <text class="bt" x="232" y="317" text-anchor="middle">播放 / 暂停</text>
+  <rect class="btn" x="288" y="298" width="76" height="28" rx="8"/>
+  <text class="bt" x="326" y="317" text-anchor="middle">下一句</text>
+  <rect class="btn" x="374" y="298" width="72" height="28" rx="8"/>
+  <text class="bt" x="410" y="317" text-anchor="middle">1.25×</text>
+  <text class="tip" x="462" y="317">倍速档位 0.75× – 2×，按一下换一档</text>
+  <text class="time" x="860" y="317" text-anchor="end">01:23 / 12:45</text>
+
+  <text class="note" x="60" y="386">「关闭」只有两个入口：控制栏按钮、Linglass 设置面板里的开关。</text>
+  <text class="note" x="60" y="408">点浮窗自己的 ×、切到别的应用、刷新页面、换视频，都会让它自己回来（默认开启）。</text>
+</svg>

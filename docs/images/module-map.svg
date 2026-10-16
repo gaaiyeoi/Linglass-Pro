@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500" role="img"
+     aria-label="src/mod 的模块依赖图：数字前缀即注入顺序，模块间用 globalThis.__llgMod 互相取用">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#8b949e"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+           "Noto Sans CJK SC", system-ui, sans-serif; }
+    .box   { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .shared{ fill: #eef4ff; stroke: #a8c7ee; stroke-width: 1.5; }
+    .pure  { fill: #fdf6ec; stroke: #e8cfa4; stroke-width: 1.5; }
+    .base  { fill: #f1fbf4; stroke: #a7d7b4; stroke-width: 1.5; }
+    .ghost { fill: #fbfbfc; stroke: #d8dee4; stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .t     { font-size: 15px; font-weight: 600; fill: #1f2328; }
+    .name  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+             font-size: 12.5px; fill: #1f2328; }
+    .d     { font-size: 12px; fill: #57606a; }
+    .ln    { stroke: #8b949e; stroke-width: 1.5; fill: none; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="499" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
+
+  <text class="t" x="30" y="48">src/mod/ 的注入顺序（数字前缀就是加载顺序）</text>
+
+  <!-- 第一排：底座与被它支撑的第一个功能 -->
+  <rect class="shared" x="22" y="76" width="211" height="132" rx="12"/>
+  <text class="name" x="38" y="106">00-shared.js</text>
+  <text class="d" x="38" y="132">共享设施</text>
+  <text class="d" x="38" y="154">控制栏按钮工厂</text>
+  <text class="d" x="38" y="176">功能注册表 · 僵尸 DOM 清理</text>
+
+  <rect class="pure" x="257" y="76" width="211" height="132" rx="12"/>
+  <text class="name" x="273" y="106">05-ja-segment.js</text>
+  <text class="d" x="273" y="132">纯函数（Node 可直测）</text>
+  <text class="d" x="273" y="154">日文「文节」切分</text>
+  <text class="d" x="273" y="176">Intl.Segmenter + 助词判据</text>
+
+  <rect class="base" x="492" y="76" width="211" height="132" rx="12"/>
+  <text class="name" x="508" y="106">10-subtitle-track.js</text>
+  <text class="d" x="508" y="132">字幕轨道记录器</text>
+  <text class="d" x="508" y="154">只读官方 Shadow DOM</text>
+  <text class="d" x="508" y="176">+ 官方缓存里的整条原文轨</text>
+
+  <rect class="box" x="727" y="76" width="211" height="132" rx="12"/>
+  <text class="name" x="743" y="106">15-ja-break.js</text>
+  <text class="d" x="743" y="132">字幕句内断句</text>
+  <text class="d" x="743" y="154">空 span + CSS ::after</text>
+  <text class="d" x="743" y="176">一个字符都不进文本流</text>
+
+  <path class="ln" d="M233 142 H 251" marker-end="url(#arrow)"/>
+  <path class="ln" d="M468 142 H 486" marker-end="url(#arrow)"/>
+  <path class="ln" d="M703 142 H 721" marker-end="url(#arrow)"/>
+
+  <!-- 换排 -->
+  <path class="ln" d="M832 208 V 250 H 128 V 282" marker-end="url(#arrow)"/>
+  <text class="d" x="150" y="268">注入顺序继续 →</text>
+
+  <!-- 第二排：面向用户的功能 -->
+  <rect class="box" x="22" y="286" width="211" height="132" rx="12"/>
+  <text class="name" x="38" y="316">30-desktop-subtitles.js</text>
+  <text class="d" x="38" y="342">桌面字幕浮窗</text>
+  <text class="d" x="38" y="364">系统级画中画窗口</text>
+  <text class="d" x="38" y="386">歌词式进度 + 播放控制栏</text>
+
+  <rect class="box" x="257" y="286" width="211" height="132" rx="12"/>
+  <text class="name" x="273" y="316">40-study-panel.js</text>
+  <text class="d" x="273" y="342">学习面板（页内侧栏）</text>
+  <text class="d" x="273" y="364">实时字幕 · 逐句跳转</text>
+  <text class="d" x="273" y="386">导出 Markdown / SRT</text>
+
+  <rect class="box" x="492" y="286" width="211" height="132" rx="12"/>
+  <text class="name" x="508" y="316">50-settings-panel.js</text>
+  <text class="d" x="508" y="342">设置面板挂载</text>
+  <text class="d" x="508" y="364">把我们的开关挂进</text>
+  <text class="d" x="508" y="386">Linglass 自己的设置面板</text>
+
+  <rect class="ghost" x="727" y="286" width="211" height="132" rx="12"/>
+  <text class="name" x="743" y="316">*.dev.js</text>
+  <text class="d" x="743" y="342">只在 make dev 注入</text>
+  <text class="d" x="743" y="364">*.sw.dev.js 挂到官方</text>
+  <text class="d" x="743" y="386">service worker 上</text>
+
+  <line x1="30" y1="446" x2="930" y2="446" stroke="#e4e8ec" stroke-width="1.5"/>
+  <text class="d" x="30" y="470">依赖（都靠 globalThis.__llgMod* 取用，不走消息传递）：00 → 15 / 30 / 40 / 50 · 05 → 15 / 30 · 10 → 30 / 40</text>
+  <text class="d" x="30" y="490">同一 content_scripts 条目内 Chrome 按数组顺序执行，所以数字前缀就是确定的加载顺序。</text>
+</svg>
