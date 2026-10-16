@@ -2808,7 +2808,10 @@ test('桌面字幕：默认只显示下一句，且下一句只有原文（译�
   // 上下文行：字号 0.8×、不透明度 55%，且不给底板 / 不给注音
   assert.match(h.pipCss(), /#next-primary \{[^}]*font-size: 21\.6px/, '27 × 0.8');
   assert.match(h.pipCss(), /#next-secondary \{[^}]*font-size: 16px/, '20 × 0.8');
-  assert.match(h.pipCss(), /#next-primary \{[^}]*opacity: 0\.55/);
+  // 「淡」在块上（整段一起淡），只有当前句不透明；悬停提亮一档，明示点得动
+  assert.match(h.pipCss(), /\.ctx \{[^}]*opacity: \.4/, '上下文行整段压到 .4');
+  assert.match(h.pipCss(), /\.ctx:hover \{ opacity: \.75; \}/);
+  assert.doesNotMatch(h.pipCss(), /#next-primary \{[^}]*opacity/, '别在行上再淡一次');
   assert.doesNotMatch(h.pipCss(), /#prev \{[^}]*background/, '上下文行不画底板');
 });
 
@@ -2895,6 +2898,87 @@ test('桌面字幕：≡ 循环 0/1/2 并落盘，0 时两段上下文都收起�
   h.pipClick('ctx'); // 0 → 1
   assert.equal(pip.appearanceOwn().ctxLines, 1);
   assert.equal(h.saved.at(-1).llgPipAppearance.ctxLines, 1);
+});
+
+test('桌面字幕：换句时给滚轮动效打方向标记，改外观不滚', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
+  const pip = sandbox.__llgModPip;
+  h.jaBreakEnabled = false;
+  await h.drain();
+  await h.drain();
+
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+  h.currentTime = 3;
+  show(h, 'きょうは あめ です', '今天下雨');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  const reel = h.lastPipWindow().document.getElementById('reel');
+  assert.ok(reel, '三段要装在 #reel 里（动效的载体）');
+  assert.equal(reel.dataset.roll, undefined, '开窗第一次填充不该自己动一下');
+
+  // 往前播 → 内容从下方推进来
+  h.currentTime = 7;
+  show(h, 'あしたは はれ です', '明天是晴天');
+  h.tick();
+  assert.equal(reel.dataset.roll, 'up', '前进 = 从下往上推');
+
+  // 往回调 → 反向
+  h.currentTime = 3;
+  h.tick();
+  assert.equal(reel.dataset.roll, 'down', '后退 = 从上往下推');
+
+  // 改外观（不换句）不该滚：方向标记保持原样，不重新触发
+  pip.setAppearanceOwn({ color: '#FFD60A' });
+  assert.equal(reel.dataset.roll, 'down', '只改颜色 → 不动效');
+
+  // 同一个方向连续换句也要能重放：标记被删掉再打回来（动画名不会自己重来）
+  h.currentTime = 7;
+  h.tick();
+  assert.equal(reel.dataset.roll, 'up');
+  assert.match(h.pipCss(), /#reel\[data-roll="up"\] \{ animation: llg-roll-up/);
+  assert.match(h.pipCss(), /@media \(prefers-reduced-motion: reduce\) \{\s*#reel\[data-roll\] \{ animation: none; \}/,
+    '系统设了「减少动态效果」就不动');
+});
+
+test('桌面字幕：点上一句 / 下一句会跳到那一句的开头并从头播', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
+  const pip = sandbox.__llgModPip;
+  h.jaBreakEnabled = false;
+  await h.drain();
+  await h.drain();
+
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+  h.currentTime = 4;   // 停在第二句句中
+  show(h, 'きょうは あめ です', '今天下雨');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  // 两块上下文行都是可点的（data-act 走既有的点击委托）
+  assert.equal(h.pipButton('prev').dataset.act, 'cue-prev');
+  assert.equal(h.pipButton('next').dataset.act, 'cue-next');
+  assert.match(h.pipCss(), /\.ctx \{[^}]*cursor: pointer/, '鼠标指针要变成手型');
+
+  const plays = h.video.plays;
+
+  // 点上一句：跳到第一句开头（骨架给的 0）并继续播 —— 不是「回到本句开头」
+  h.pipClick('cue-prev');
+  assert.equal(h.currentTime, 0, '跳到上一句的开头');
+  assert.equal(h.video.plays, plays + 1, '并且从头播');
+
+  // 点下一句：跳到紧接着那句的开头（上一跳之后当前句是第 0 句 → 下一句起点 2.5）
+  h.pipClick('cue-next');
+  assert.equal(h.currentTime, 2.5, '跳到下一句的开头');
+  assert.equal(h.video.plays, plays + 2);
+
+  // 没有下一句时点了不该把播放停掉、也不该出错（末句）
+  h.currentTime = 8;
+  h.tick();
+  assert.equal(pip.command('cue-next'), false, '末句没有下一句 → 什么都没做');
 });
 
 test('桌面字幕：上下文行的断句跟随视频内那个开关', async () => {

@@ -109,13 +109,14 @@
   /** #stage 的段间距（与 PIP_BASE_CSS 的 gap 一致）—— 上下文行数变化时高度要算进去 */
   const STAGE_GAP = 8;
   /**
-   * 上下文行（上一句 / 下一句）相对当前句的字号比例与不透明度。
+   * 上下文行（上一句 / 下一句）相对当前句的字号比例。
    *
-   * 比当前句小一号、淡一半：上下文是用来「扫一眼」的，抢了当前句的对比就没法读了。
-   * 这两个数是刻意的固定值，不进样式条（PLAN 029 的「不做什么」）。
+   * 比当前句小一号：上下文是用来「扫一眼」的，抢了当前句的对比就没法读了。
+   * 这个数是刻意的固定值，不进样式条（PLAN 029 的「不做什么」）。
+   * 「淡」不再走这条生成式样式 —— 它挪到了 PIP_BASE_CSS 的 `.ctx`（整段一起淡、可悬停，
+   * 见 PLAN 030），所以这里只剩字号比例。
    */
   const CTX_FONT_RATIO = 0.8;
-  const CTX_OPACITY = 0.55;
   /** 字幕行的 line-height（与 PIP_BASE_CSS 的 #line-* 一致） */
   const LINE_HEIGHT = 1.3;
   /**
@@ -595,11 +596,28 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 #line-primary, #line-secondary { position: relative; display: block;
   line-height: 1.3; text-align: center; white-space: pre-wrap; }
 /* 上下文行（PLAN 029）：上一句 / 下一句各占一块，块内原文一行 + 译文一行。
-   字号与不透明度由 pipCss() 按当前外观生成（比当前句小一档、淡一半）。
-   刻意不画底板、不带进度填充：底板与填充是「正在读的那句」的专属。 */
+   字号由 pipCss() 按当前外观生成（比当前句小一档），「淡」在块上 —— 整段一起淡，
+   只有当前句（#plate）是不透明的（PLAN 030）。刻意不画底板、不带进度填充。 */
 .ctx { display: flex; flex-direction: column; align-items: center;
-  max-width: 100%; min-width: 0; }
+  max-width: 100%; min-width: 0; opacity: .4; cursor: pointer;
+  transition: opacity .18s ease; }
+/* 悬停：提亮一档，明示「这两段点得动」（点了会跳到那一句的开头重播） */
+.ctx:hover { opacity: .75; }
 .ctx-line { display: block; line-height: 1.3; text-align: center; white-space: pre-wrap; }
+
+/* 滚轮（PLAN 030）：换句时三段整列推进一格 —— 前进从下方推入、后退从上方推入。
+   真正的滚动容器做不到这件事：当前句比上下文行大一档，条目不等高，硬滚会抖。
+   动效只由 JS 打方向标记触发（data-roll），外观变化（改色/改字号）不滚。 */
+#reel { display: flex; flex-direction: column; align-items: center;
+  max-width: 100%; min-width: 0; gap: 8px; }
+@keyframes llg-roll-up { from { transform: translateY(22px); opacity: .3; } to { transform: none; opacity: 1; } }
+@keyframes llg-roll-down { from { transform: translateY(-22px); opacity: .3; } to { transform: none; opacity: 1; } }
+#reel[data-roll="up"] { animation: llg-roll-up .26s cubic-bezier(.22, .61, .36, 1); }
+#reel[data-roll="down"] { animation: llg-roll-down .26s cubic-bezier(.22, .61, .36, 1); }
+/* 系统设了「减少动态效果」就别动（只在缩放/位移上做文章的那种动效，最容易引起不适） */
+@media (prefers-reduced-motion: reduce) {
+  #reel[data-roll] { animation: none; }
+}
 #stage:not(:has(#line-primary:not(:empty)))::before {
   content: "— 等待 Linglass 字幕 —";
   font-size: 15px; font-weight: 400; color: #7a7a80; letter-spacing: .04em; }
@@ -672,16 +690,17 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   letter-spacing: ${letterSpacing}; color: ${secondaryColor};
   text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
   -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
-/* 上下文行（PLAN 029）：同一套字体栈 / 描边 / 阴影，只把字号压到 0.8×、整块压到 55% 透明度。
-   注音不会有（官方只有当前句渲染 <ruby>），底板与进度填充也不给（见 PIP_BASE_CSS 的 .ctx） */
+/* 上下文行（PLAN 029）：同一套字体栈 / 描边 / 阴影，只把字号压到 0.8×。
+   「淡」与「可点」在 PIP_BASE_CSS 的 .ctx 上（整段一起，只有当前句不透明）。
+   注音不会有（官方只有当前句渲染 <ruby>），底板与进度填充也不给 */
 #prev-primary, #next-primary { font-family: ${fontStackOf(spec, target.primaryLang)};
   font-size: ${round1(size.primary * CTX_FONT_RATIO)}px; font-weight: ${primaryWeightOf(spec, target)};
-  letter-spacing: ${letterSpacing}; color: ${target.color}; opacity: ${CTX_OPACITY};
+  letter-spacing: ${letterSpacing}; color: ${target.color};
   text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
   -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
 #prev-secondary, #next-secondary { font-family: ${fontStackOf(spec, target.secondaryLang)};
   font-size: ${round1(size.secondary * CTX_FONT_RATIO)}px; font-weight: ${spec.secondaryWeight};
-  letter-spacing: ${letterSpacing}; color: ${secondaryColor}; opacity: ${CTX_OPACITY};
+  letter-spacing: ${letterSpacing}; color: ${secondaryColor};
   text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
   -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
 /* 振假名：只有官方这行本来就渲染了 <rt> 时才会出现（跟随官方，见 pushText 的 richTokens）。
@@ -849,6 +868,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let lastKey = '';
   /** 上一次写进进度条的百分比（先比对再写，见 pushProgress） */
   let lastFill = '';
+  /** 上一次渲染的是第几句（-1 = 还没有）：只有它变了才播滚轮动效（见 pushText） */
+  let lastCueIndex = -1;
   /** PiP 里那张 <style>（窗口重建时换引用，关窗时清掉） */
   let styleEl = null;
   /** 当前生效的外观 = 浮窗自己的四项 + 跟随官方的语言（见 composeAppearance） */
@@ -1132,6 +1153,20 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     };
   }
 
+  /**
+   * 滚轮动效（PLAN 030）：给 #reel 打一个方向标记，CSS 那边按标记播放 keyframes。
+   *
+   * 为什么要先删、读一次 offsetWidth、再打上：同一个动画名连着用第二次不会重放，
+   * 而「连续换句」恰恰是最常见的场景（中间那次读 offsetWidth 强制重排是必须的）。
+   */
+  function roll(dir) {
+    const reel = pipWin && pipWin.document.getElementById('reel');
+    if (!reel) return;
+    delete reel.dataset.roll;
+    void reel.offsetWidth;
+    reel.dataset.roll = dir;
+  }
+
   /** 把一段上下文行写进 DOM：没内容（或档位不够）就整段收起来，不留空行 */
   function pushContext(id, visible, text) {
     const d = pipWin.document;
@@ -1184,6 +1219,14 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
     pushContext('prev', ctx >= 2, prev);
     pushContext('next', ctx >= 1, next);
+
+    // 滚轮动效只跟着「当前句换了一句」走：改颜色 / 改字号 / 开关断句都不该滚。
+    // 首次填充（上一次是 -1）也不滚 —— 开窗那一瞬间不该自己动一下。
+    const index = track.getCurrent() ? track.getCurrent().index : -1;
+    if (lastCueIndex >= 0 && index >= 0 && index !== lastCueIndex) {
+      roll(index > lastCueIndex ? 'up' : 'down');
+    }
+    lastCueIndex = index;
   }
 
   /**
@@ -1313,6 +1356,20 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
         if (el.paused) el.play();
         else el.pause();
         break;
+      case 'cue-prev':
+      case 'cue-next': {
+        // 点上下文行（PLAN 030）：马上跳到那一句的**开头**并从那里继续播 ——
+        // 与控制栏的 prev/next 不同（那两个在句内会先回到本句开头，见 PLAN 004）
+        const offset = act === 'cue-prev' ? -1 : 1;
+        const current = track.getCurrent();
+        const cue = current && current.index != null
+          ? (track.getCues() || [])[current.index + offset]
+          : null;
+        if (!cue) return false;
+        el.currentTime = cue.start;
+        el.play();
+        break;
+      }
       case 'back':
         el.currentTime = Math.max(0, el.currentTime - SEEK_STEP);
         break;
@@ -1693,6 +1750,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     styleNodes = null; // 样式条的回显引用同理
     barMode = 'play';  // 新窗口从播放控制栏开始，不继承上一扇窗的样式条状态
     lastKey = '';
+    lastCueIndex = -1; // 新窗口的第一次填充不播滚轮动效
     lastFill = '';  // 新窗口的填充条是从 0 开始的，别被上一扇窗的值挡住第一次写
     refreshButton();
   }
@@ -1748,11 +1806,14 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     }
 
     // 上下文行（PLAN 029）：当前句上面一段「上一句」、下面一段「下一句」。
-    // 结构与当前句刻意不同 —— 它们没有底板、没有进度填充（那两样属于正在读的那句）
-    const ctxBlock = (side) => {
+    // 结构与当前句刻意不同 —— 它们没有底板、没有进度填充（那两样属于正在读的那句），
+    // 而且整段是淡的（.ctx 上的 opacity），只有当前句不透明。
+    // 两块都挂 data-act：点它 = 跳到那一句的开头重播（PLAN 030）
+    const ctxBlock = (side, act) => {
       const block = d.createElement('div');
       block.className = 'ctx';
       block.id = side;
+      block.dataset.act = act;
       for (const kind of ['primary', 'secondary']) {
         const text = d.createElement('span');
         text.className = 'ctx-line';
@@ -1761,10 +1822,15 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       }
       return block;
     };
-    const prev = ctxBlock('prev');
-    const next = ctxBlock('next');
+    const prev = ctxBlock('prev', 'cue-prev');
+    const next = ctxBlock('next', 'cue-next');
 
-    stage.append(prev, plate, next);
+    // 三段装在 #reel 里：换句时整列像滚轮一样推进一格（见 PIP_BASE_CSS 的 keyframes）
+    const reel = d.createElement('div');
+    reel.id = 'reel';
+    reel.append(prev, plate, next);
+
+    stage.append(reel);
 
     const bar = d.createElement('div');
     bar.id = 'bar';
