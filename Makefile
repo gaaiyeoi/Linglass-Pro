@@ -9,21 +9,24 @@
 #
 # 官方发新版：
 #   make vendor-update
+#
+# 要把扩展装给不懂命令行的人（见 docs/plans/023-one-click-installer.md）：
+#   make package      产出 release/Linglass-Pro-<版本>-installer.zip
 
 SHELL    := /bin/bash
-ARC_APP  := Arc
 DIST     := dist
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test probe dev open check vendor-update vendor-from clean
+.PHONY: help build test probe dev open package check vendor-update vendor-from clean
 
 help:
 	@echo "make build                        构建 dist/（正式版）"
 	@echo "make test                         跑契约测试与逻辑冒烟测试"
 	@echo "make probe                        开一个带扩展的浏览器实测（弹窗，跑完保留窗口）"
 	@echo "make dev                          监听 src/ 自动重建 + 自动重载（开发用）"
-	@echo "make open                         打开 Arc 扩展管理页（arc://extensions）"
+	@echo "make open                         打开已装浏览器的扩展管理页"
+	@echo "make package                      打「一键安装包」到 release/"
 	@echo "make check                        检查 dist/ 是否已正确注入 mod 脚本"
 	@echo "make vendor-update                从 Chrome 商店拉取官方最新版作为基线"
 	@echo "make vendor-from FROM=~/ll.crx    从本地 crx / zip / 解压目录导入基线"
@@ -44,8 +47,22 @@ dev:
 	node tools/dev.mjs
 
 open:
-	@open -a "$(ARC_APP)" "arc://extensions" 2>/dev/null || open -a "$(ARC_APP)"
+	@for spec in "Google Chrome|chrome://extensions" "Arc|arc://extensions" \
+	             "Microsoft Edge|chrome://extensions" "Brave Browser|chrome://extensions" \
+	             "Chromium|chrome://extensions"; do \
+	  app=$${spec%%|*}; url=$${spec##*|}; \
+	  if [ -d "/Applications/$$app.app" ]; then \
+	    open -a "$$app" "$$url" 2>/dev/null || open -a "$$app"; \
+	    echo "已在 $$app 打开扩展管理页"; \
+	    exit 0; \
+	  fi; \
+	done; \
+	echo "没找到 Chrome / Arc / Edge / Brave，请手动打开扩展管理页（chrome://extensions）"
 	@echo "→ 开发者模式 → 加载已解压的扩展程序 → 选 $$(pwd)/$(DIST)"
+
+# 一键安装包：只装我们自己的东西；官方基线由用户本机安装时自己拉（合规红线见 PLAN 023）
+package: build
+	@node tools/package.mjs
 
 check:
 	@test -f "$(DIST)/manifest.json" || (echo "dist/ 不存在，先跑 make build"; exit 1)

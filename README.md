@@ -11,6 +11,7 @@
 
 - [功能](#功能)
 - [环境要求](#环境要求)
+- [只想装上用（不写代码）](#只想装上用不写代码)
 - [起步](#起步)
 - [日常命令](#日常命令)
 - [工作原理](#工作原理)
@@ -83,8 +84,29 @@
 ## 环境要求
 
 - Node.js 18+（用到 `node:test` 与全局 `fetch`）
-- macOS（`make vendor-update` 依赖系统的 `unzip`）
-- Arc 或任意 Chromium 116+ 浏览器（桌面字幕浮窗需要 `documentPictureInPicture`）
+- macOS 或 Windows（解包 CRX 走仓库自带的 `tools/zip.mjs`，零依赖，**不需要**系统的 `unzip`）
+- Chrome / Arc 或任意 Chromium 116+ 浏览器（桌面字幕浮窗需要 `documentPictureInPicture`）
+
+## 只想装上用（不写代码）
+
+要把这个扩展装进**别人的浏览器**，对方不需要懂命令行：
+
+```bash
+make package   # 产出 release/Linglass-Pro-<版本>-installer.zip
+```
+
+对方解压后：**macOS 双击 `install-macos.command`，Windows 双击 `install-windows.bat`**。
+安装器会自己从 Chrome 商店拉官方基线、生成 `dist/`、打开浏览器扩展管理页，
+并弹出图文向导（[`docs/install-guide.html`](docs/install-guide.html)，安装包里也带一份）。
+剩下那 4 下点击（开发者模式 → 加载已解压的扩展程序 → 选 `dist/`）是 Chrome 的安全边界，
+没有任何脚本能代劳，向导里写清了点哪里。
+
+对方唯一需要额外准备的是 [Node.js](https://nodejs.org/zh-cn/download)（LTS 即可）——
+安装器检测不到会引导去装，而**扩展本身并不需要它**。
+
+> 发布包里**只有我们自己的代码**（`src/mod/`、构建脚本、安装器、向导）。
+> 官方基线由**用户本机**在安装那一刻自己从商店拉 —— 本仓库不重新分发 Linglass 的专有代码。
+> 这是硬约束，所以 `make package` 打完包会把 zip 读回来自检：混进 `vendor/` 或 `dist/` 直接失败。
 
 ## 起步
 
@@ -109,7 +131,8 @@ make open            # 打开浏览器扩展管理页
 | `make test` | 跑契约测试与逻辑冒烟测试 |
 | `make check` | 自检 `dist/` 是否已正确注入 mod 脚本 |
 | `make probe` | 开一个带扩展的浏览器做实测（弹窗，跑完保留窗口） |
-| `make open` | 打开扩展管理页（Arc） |
+| `make open` | 打开扩展管理页（自动挑已装的 Chrome / Arc / Edge / Brave） |
+| `make package` | 打「一键安装包」到 `release/`，发给不懂命令行的人用 |
 | `make vendor-update` | 从 Chrome 商店拉取官方最新版作为基线，并重新构建 |
 | `make vendor-from FROM=~/x.crx` | 从本地 crx / zip / 解压目录导入基线 |
 | `make clean` | 删除 `dist/` |
@@ -143,17 +166,24 @@ Linglass-Pro/
 ├── Makefile                门禁与日常命令
 ├── build.mjs               构建脚本（契约校验 + 叠加 + 注入自检）
 ├── README.md
+├── install-macos.command   一键安装包的双击入口（macOS）
+├── install-windows.bat     一键安装包的双击入口（Windows）
 ├── docs/
 │   ├── images/             README 的配图（手写 SVG，零依赖）
+│   ├── install-guide.html  面向非技术用户的图文安装向导
 │   └── plans/NNN-*.md      一个需求一份 PLAN，做完留档
 ├── src/mod/                我们的全部代码（见下一节）
 ├── tools/
 │   ├── dev.mjs             监听 + 自动重建 + 通过 SW 触发扩展重载
 │   ├── import-vendor.mjs   从商店 / 本地导入官方基线
+│   ├── install.mjs         一键安装器：下载基线 + 构建 + 打开向导
+│   ├── package.mjs         打发布包（白名单 + 合规自检）
 │   ├── probe.mjs           CDP 探针：在真实浏览器里读 Linglass 的内部数据
-│   └── test/               契约 contract.test.mjs + 冒烟 smoke.test.mjs
-│                           + 断句规则 ja-segment.test.mjs
+│   ├── zip.mjs             手写 zip 读写（零依赖：解 CRX 与打发布包共用）
+│   └── test/               契约 contract / 冒烟 smoke / 断句 ja-segment
+│                           / zip 与安装器 zip + install
 ├── vendor/                 官方基线（只读，不进版本控制）
+├── release/                一键安装包产物（不进版本控制）
 └── dist/                   构建产物（可加载的完整扩展，不进版本控制）
 ```
 
@@ -177,18 +207,19 @@ Linglass-Pro/
 
 ## 验证方式
 
-`make test`（`node --test tools/test/*.test.mjs`，零依赖）包含两层，当前 **85 例全绿**：
+`make test`（`node --test tools/test/*.test.mjs`，零依赖）包含四组，当前 **99 例全绿**：
 
 ```text
 $ make test
-# tests 85
-# pass 85
-# fail 0
+ℹ tests 99
+ℹ pass 99
+ℹ fail 0
 ```
 
 - **契约测试**（`contract.test.mjs`）—— 断言我们对官方产物与 YouTube 平台的所有依赖仍然成立（DOM class、shadowRoot 模式、点击处理器的短路行为、面板的裁剪机制）。它从源码里提取我们实际用到的选择器，而不是读一份手写清单；新增对官方 DOM 的依赖必须登记进来。
 - **冒烟测试**（`smoke.test.mjs`）—— 用 `node:vm` 开沙箱、把 `document` / `chrome` / `MutationObserver` 换成桩件，把 `src/mod/*.js` 原封不动跑起来，覆盖时间轴推导、去重、暂停保护、注音与断句共存、导出格式、常驻语义等。
 - **断句规则测试**（`ja-segment.test.mjs`）—— 纯函数模块单独一个文件，喂空沙箱直接驱动 `cut()`，逐条对齐上面那张切分口径表；除具体切分外还断言一条与实现无关的不变量：切点严格升序且拼回去等于原文。
+- **zip 与安装器测试**（`zip.test.mjs` / `install.test.mjs`）—— 手写 zip 的往返、可执行位恢复、zip slip 与 zip64 边界、CRC 对已知向量校准；以及安装器里那张「候选浏览器」表 —— 路径或顺序写错的表现是「用户双击后什么都不弹」，不会报错，所以单独锁住。
 
 浏览器内的视觉与交互行为（面板滑入、浮窗是否真的留在桌面、MutationObserver 的真实时序）**Node 测不了**，属于人工确认范围；`make probe`（CDP 驱动真实浏览器）可以半自动地跑一部分。
 
@@ -200,6 +231,8 @@ $ make test
 - 面板在**播放页**寄生进 YouTube 的推荐列，宽度交给 YouTube 自己算，所以不遮挡任何东西；**其它页面**（首页 / 搜索页没有那一列）退回「右侧悬浮 + 页面让位」，那种形态下面板会收窄页面、并在视频全屏时自动收起。
 - 句级时间戳的精度取决于 MutationObserver 的触发时刻（就是字幕切换那一瞬）；官方不暴露内部 cue 时间轴，**词级时间戳拿不到**，词级进度只能用句内线性插值近似。
 - 运行的是官方商店下发的产物，所以桌面字幕浮窗依赖浏览器的 `documentPictureInPicture`（Chromium 116+，Arc 可用）。
+- **一键安装包需要对方先装一次 Node.js**：彻底免 Node 要么重写整套构建，要么让安装器自己下载便携版 Node（约 40MB/平台，Windows 侧还得先解决「没有解压器」的鸡生蛋）—— 当前是刻意的取舍，见 [`docs/plans/023-one-click-installer.md`](docs/plans/023-one-click-installer.md)。
+- **官方发新版不会自动同步**：用户要重新双击一次安装文件，再在扩展管理页点一下刷新。
 
 ## 开发约定
 

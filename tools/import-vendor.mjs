@@ -10,15 +10,16 @@
  * 自带的 mod 代码全部在 src/mod/ 下，与基线版本无关。
  *
  * 加 --force 可覆盖同版本已存在的目录。
+ *
+ * crx/zip 的解包用仓库自带的 tools/zip.mjs（手写、零依赖），所以不依赖系统 unzip ——
+ * macOS 不用再要求用户装命令行工具，Windows 上也能跑。
  */
-import { execFile } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
+import { unzipTo } from './zip.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const VENDOR_DIR = path.join(ROOT, 'vendor');
@@ -64,17 +65,6 @@ function crxToZip(buf) {
   return buf.subarray(offset);
 }
 
-async function unzip(zipPath, outDir) {
-  try {
-    await execFileAsync('unzip', ['-q', '-o', zipPath, '-d', outDir]);
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      throw new Error('系统没有 unzip 命令，无法解包 crx/zip');
-    }
-    throw new Error(`解包失败: ${err.stderr || err.message}`);
-  }
-}
-
 /** 允许传进来的目录外面多包一层，自动下钻到含 manifest.json 的那一层 */
 async function resolveRoot(dir) {
   const direct = path.join(dir, 'manifest.json');
@@ -93,7 +83,7 @@ async function resolveRoot(dir) {
   throw new Error(`${dir} 里找不到 manifest.json`);
 }
 
-async function preparePayload(args, tmp) {
+async function preparePayload(args) {
   if (args.download) {
     log(`下载  ${CRX_URL.slice(0, 72)}…`);
     const res = await fetch(CRX_URL);
@@ -101,9 +91,7 @@ async function preparePayload(args, tmp) {
     const buf = Buffer.from(await res.arrayBuffer());
     log(`下载完成  ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
 
-    const zipPath = path.join(tmp, 'payload.zip');
-    await writeFile(zipPath, crxToZip(buf));
-    return zipPath;
+    return { kind: 'archive', buf: crxToZip(buf) };
   }
 
   const src = path.resolve(args.from.replace(/^~(?=\/)/, process.env.HOME ?? '~'));
@@ -111,14 +99,11 @@ async function preparePayload(args, tmp) {
 
   if (info.isDirectory()) {
     log(`来源  目录 ${src}`);
-    return src;
+    return { kind: 'dir', dir: src };
   }
 
   log(`来源  文件 ${src}`);
-  const buf = await readFile(src);
-  const zipPath = path.join(tmp, 'payload.zip');
-  await writeFile(zipPath, crxToZip(buf));
-  return zipPath;
+  return { kind: 'archive', buf: crxToZip(await readFile(src)) };
 }
 
 async function main() {
@@ -138,16 +123,16 @@ async function main() {
   const tmp = await mkdtemp(path.join(tmpdir(), 'linglass-vendor-'));
 
   try {
-    const payload = await preparePayload(args, tmp);
+    const payload = await preparePayload(args);
 
     let root;
-    if ((await stat(payload)).isDirectory()) {
-      root = await resolveRoot(payload);
+    if (payload.kind === 'dir') {
+      root = await resolveRoot(payload.dir);
     } else {
       const outDir = path.join(tmp, 'extracted');
       await mkdir(outDir, { recursive: true });
       log('解开  归档');
-      await unzip(payload, outDir);
+      await unzipTo(payload.buf, outDir);
       root = await resolveRoot(outDir);
     }
 

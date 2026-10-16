@@ -1,6 +1,9 @@
 # 构建产物，由 `make build` 生成
 dist/
 
+# 一键安装包，由 `make package` 生成
+release/
+
 # 官方基线：Linglass 商店下发的专有代码，不进版本控制，也不随仓库公开分发。
 # 用 `make vendor-update` 从 Chrome 商店重新下载即可。
 vendor/
