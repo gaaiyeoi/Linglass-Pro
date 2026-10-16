@@ -60,7 +60,7 @@ open:
 	echo "没找到 Chrome / Arc / Edge / Brave，请手动打开扩展管理页（chrome://extensions）"
 	@echo "→ 开发者模式 → 加载已解压的扩展程序 → 选 $$(pwd)/$(DIST)"
 
-# 一键安装包：只装我们自己的东西；官方基线由用户本机安装时自己拉（合规红线见 PLAN 023）
+# 两个安装包：完整版（含 dist，下载即用）与安装器版（只含我们的代码）—— 见 PLAN 024
 package: build
 	@node tools/package.mjs
 

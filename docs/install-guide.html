@@ -96,6 +96,9 @@
     font-size: 15px;
   }
   .note b { color: var(--warn-ink); }
+  .note ul { margin: 8px 0; padding-left: 22px; }
+  .note li + li { margin-top: 6px; }
+  .note code { background: transparent; border-color: var(--warn-line); color: var(--warn-ink); }
   h3 { font-size: 17px; margin: 36px 0 10px; }
   details {
     border: 1px solid var(--line);
@@ -130,8 +133,19 @@
 
 <main>
   <div class="note">
-    <b>先看这里：</b>安装程序已经帮你做完了下载和构建，只剩下面 4 下点击 ——
-    这 4 下必须由你亲自点，浏览器不允许任何程序代劳。
+    <b>先确认手上是哪个包：</b>
+    <ul>
+      <li>
+        解压后看到 <code>install-macos.command</code> 或 <code>install-windows.bat</code>
+        —— 这是<b>安装器版</b>：先双击它（macOS 第一次要右键 → 打开），
+        等它跑完，再做下面 4 步。
+      </li>
+      <li>
+        解压后直接看到 <code>manifest.json</code> 和一个叫 <code>mod</code> 的文件夹
+        —— 这是<b>完整版</b>：什么都不用装、不用联网，直接做下面 4 步。
+      </li>
+    </ul>
+    剩下这 4 下点击必须由你亲自点，浏览器不允许任何程序代劳。
   </div>
 
   <ol class="steps">
@@ -174,9 +188,18 @@
     <li>
       <h2>点「加载已解压的扩展程序」，选中 dist 文件夹</h2>
       <p>
-        安装程序已经在文件管理器中帮你选中了它。你要选的是解压出来的文件夹里那个叫
-        <strong>dist</strong> 的文件夹（它旁边还有 src、tools、docs 几个文件夹）。
+        要选哪一层文件夹，看你手上是哪个包：
       </p>
+      <ul>
+        <li>
+          <strong>完整版</strong> —— 选解压出来的那个文件夹本身
+          （里面能直接看到 <code>manifest.json</code> 和 <code>mod</code>）。
+        </li>
+        <li>
+          <strong>安装器版</strong> —— 选那个文件夹里叫 <code>dist</code> 的<b>子</b>文件夹
+          （它旁边还有 src、tools、docs）。
+        </li>
+      </ul>
       <figure>
         <svg viewBox="0 0 520 196" role="img" aria-label="选择 dist 文件夹示意">
           <rect x="1" y="1" width="518" height="194" rx="10" fill="var(--card)" stroke="var(--line)"/>
@@ -188,7 +211,7 @@
           <text x="38" y="106" font-size="11" fill="var(--accent)">Linglass-Pro-安装包</text>
           <text x="46" y="126" font-size="10" fill="var(--muted)">└ dist</text>
           <rect x="176" y="60" width="150" height="22" rx="5" fill="var(--accent-soft)"/>
-          <text x="186" y="75" font-size="12" fill="var(--ink)">dist ●（选这个）</text>
+          <text x="186" y="75" font-size="12" fill="var(--ink)">dist（安装器版选这层）</text>
           <text x="186" y="103" font-size="11" fill="var(--muted)">src</text>
           <text x="186" y="123" font-size="11" fill="var(--muted)">tools　docs</text>
           <rect x="380" y="160" width="116" height="26" rx="6" fill="var(--accent)"/>
@@ -196,9 +219,9 @@
         </svg>
       </figure>
       <div class="note">
-        <b>选错文件夹是最常见的失败：</b>选了上一层（安装包目录）或下一层都不行 ——
-        <code>dist</code> 里应该能看到一个 <code>manifest.json</code> 文件，看不见扩展名也没关系，
-        只要选中的是 <code>dist</code> 这一层。
+        <b>选错文件夹是最常见的失败：</b>判断标准只有一个 ——
+        你选中的那一层里要能<b>直接看到</b> <code>manifest.json</code>。
+        看不见扩展名也没关系，图标是「一张纸带个小齿轮」那个就是。
       </div>
     </li>
 
@@ -231,7 +254,7 @@
     </li>
   </ol>
 
-  <h3>双击安装文件没反应？</h3>
+  <h3>双击安装文件没反应？（只有安装器版会遇到）</h3>
   <details>
     <summary>macOS：提示「无法打开，因为它来自身份不明的开发者」</summary>
     <p>
@@ -251,13 +274,16 @@
       <a href="https://nodejs.org/zh-cn/download">nodejs.org</a> 下载 <strong>LTS</strong> 版本，一路默认装完，
       再双击一次安装文件即可。
     </p>
+    <p>
+      完整版不会遇到这个提示 —— 它什么都不用装。
+    </p>
   </details>
   <details>
     <summary>Windows：提示「Windows 已保护你的电脑」</summary>
     <p>点「更多信息」→「仍要运行」。这是因为安装脚本没有花钱买数字签名。</p>
   </details>
   <details>
-    <summary>安装时的窗口里一堆滚动的英文，正常吗？</summary>
+    <summary>安装时的窗口里一堆滚动的英文，正常吗？（只有安装器版会弹这个窗口）</summary>
     <p>
       正常。那是下载和构建的日志，中间出现几行黄色 <code>⚠️</code> 也多半只是提示。
       只要最后出现「还差 4 下点击」就算成功；看到 <code>✖</code> 才是失败，窗口里会写原因，
@@ -267,9 +293,14 @@
   <details>
     <summary>Linglass 官方更新了，我这边怎么办？</summary>
     <p>
-      重新双击一次安装文件即可 —— 它会重新拉最新官方版本、重新生成 <code>dist</code>。
-      然后回到扩展管理页，点 Linglass-Pro 卡片上的「刷新」按钮（&#8635;）。
-      官方发新版不会自动同步到你这里，需要你手动跑一次。
+      官方发新版<b>不会</b>自动同步到你这里，需要手动换一次：
+    </p>
+    <ul>
+      <li><b>安装器版</b>：重新双击一次安装文件，它会拉最新官方版本、重新生成 <code>dist</code>。</li>
+      <li><b>完整版</b>：向给你这个包的人要一份新包，重新解压。</li>
+    </ul>
+    <p>
+      换完之后回到扩展管理页，点 Linglass-Pro 卡片上的「刷新」按钮（&#8635;）即可。
     </p>
   </details>
   <details>
@@ -289,11 +320,20 @@
     </p>
   </details>
   <details>
-    <summary>为什么安装时要联网下载，而不是直接给一个压缩包？</summary>
+    <summary>「安装器版」和「完整版」到底差在哪？</summary>
     <p>
-      官方扩展的代码归原作者所有，本项目不重新分发它 —— 所以由你的电脑自己去 Chrome 商店取一份，
-      再叠加上本项目的改造。这样也保证每次安装都拿到官方最新版。
+      两个包装的是同一件东西（Linglass 官方代码 + 本项目的改造），区别只在「谁去把官方那份取回来」：
     </p>
+    <ul>
+      <li>
+        <b>完整版</b>：包里已经装好了，拿来即用。代价是它包含官方代码，
+        所以只在私下流传，不要公开传播。
+      </li>
+      <li>
+        <b>安装器版</b>：包里只有本项目的代码，官方那份由你的电脑自己去 Chrome 商店取。
+        更干净，代价是要先装一次 Node.js 并联网。
+      </li>
+    </ul>
   </details>
 </main>
 

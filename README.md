@@ -89,24 +89,37 @@
 
 ## 只想装上用（不写代码）
 
-要把这个扩展装进**别人的浏览器**，对方不需要懂命令行：
+要把这个扩展装进**别人的浏览器**，对方不需要懂命令行。一条命令产出两个包：
 
 ```bash
-make package   # 产出 release/Linglass-Pro-<版本>-installer.zip
+make package   # → release/Linglass-Pro-<版本>-extension.zip
+               #   release/Linglass-Pro-<版本>-installer.zip
 ```
 
-对方解压后：**macOS 双击 `install-macos.command`，Windows 双击 `install-windows.bat`**。
-安装器会自己从 Chrome 商店拉官方基线、生成 `dist/`、打开浏览器扩展管理页，
-并弹出图文向导（[`docs/install-guide.html`](docs/install-guide.html)，安装包里也带一份）。
-剩下那 4 下点击（开发者模式 → 加载已解压的扩展程序 → 选 `dist/`）是 Chrome 的安全边界，
-没有任何脚本能代劳，向导里写清了点哪里。
+| 包 | 对方要做什么 | 体积 |
+| --- | --- | --- |
+| **完整版** `-extension.zip` | 解压 → 在扩展页选中那个文件夹 → 完事。**不用装任何东西、不用联网** | 约 1 MB |
+| **安装器版** `-installer.zip` | 先装 [Node.js](https://nodejs.org/zh-cn/download)（LTS）→ 双击 `install-macos.command` / `install-windows.bat` → 等它拉官方基线并构建 | 约 0.1 MB |
 
-对方唯一需要额外准备的是 [Node.js](https://nodejs.org/zh-cn/download)（LTS 即可）——
-安装器检测不到会引导去装，而**扩展本身并不需要它**。
+两种包最后都剩同样 4 下点击（开发者模式 → 加载已解压的扩展程序 → 选中文件夹 → 完成）——
+那是 Chrome 的安全边界，没有任何脚本能代劳。包里各带一份图文向导
+（源文件 [`docs/install-guide.html`](docs/install-guide.html)，完整版里叫 `INSTALL.html`），写清了点哪里。
 
-> 发布包里**只有我们自己的代码**（`src/mod/`、构建脚本、安装器、向导）。
-> 官方基线由**用户本机**在安装那一刻自己从商店拉 —— 本仓库不重新分发 Linglass 的专有代码。
-> 这是硬约束，所以 `make package` 打完包会把 zip 读回来自检：混进 `vendor/` 或 `dist/` 直接失败。
+文件名里的 `1.12.4.900` 读作「官方基线 1.12.4 + 本项目的第 900 号补丁」：
+`build.mjs` 把产物版本号的 patch 固定成 `900`（避免和商店更新撞号），
+所以官方只动小版本时产物版本号不变（1.12.3 与 1.12.4 都是 `1.12.900`）——
+**只能靠文件名里这段分辨基于哪个官方版本**。
+
+> ⚠️ **完整版包含 Linglass 的官方代码。** 分发它是使用者的选择，风险由分发者承担：
+> 公开传播可能招致原作者投诉乃至被 DMCA 下架，建议只在私人范围流传。
+>
+> 想发一个「干净」的包就用**安装器版**：它只含我们自己的代码，官方基线由**对方的电脑**
+> 在安装那一刻自己去商店取。`make package` 打完包会把两个 zip 都读回来自检 ——
+> 安装器版混进 `vendor/` 或 `dist/` 直接失败，完整版则校验「有没有内嵌一层、
+> `manifest.json` 在不在那一层的根」。
+>
+> 无论哪种包，`vendor/` 与 `dist/` 都**不进版本控制**：仓库本身始终只有我们自己的代码，
+> 完整包是 `release/` 下的产物，不是仓库内容。
 
 ## 起步
 
@@ -117,7 +130,9 @@ make open            # 打开浏览器扩展管理页
 
 在 `arc://extensions`（或 `chrome://extensions`）里打开开发者模式，点「加载已解压的扩展程序」，选本项目的 `dist/` 目录。
 
-> `vendor/` 不在版本控制里 —— 那是 Linglass 的专有代码，本仓库不重新分发它。第一次使用必须先跑 `make vendor-update`。
+> `vendor/` 不在版本控制里 —— 那是 Linglass 的专有代码，仓库只把它当只读基线用。
+> 第一次使用必须先跑 `make vendor-update`（安装器版打包时，这一步由对方的安装程序代劳）。
+> 关于分发口径，见上面「只想装上用（不写代码）」一节。
 
 日常开发用 `make dev`：改完源码自动重建，并让扩展自动重载，不用手点刷新按钮。
 
@@ -132,7 +147,7 @@ make open            # 打开浏览器扩展管理页
 | `make check` | 自检 `dist/` 是否已正确注入 mod 脚本 |
 | `make probe` | 开一个带扩展的浏览器做实测（弹窗，跑完保留窗口） |
 | `make open` | 打开扩展管理页（自动挑已装的 Chrome / Arc / Edge / Brave） |
-| `make package` | 打「一键安装包」到 `release/`，发给不懂命令行的人用 |
+| `make package` | 打两个包到 `release/`：完整版（下载即用）与安装器版（只含我们代码） |
 | `make vendor-update` | 从 Chrome 商店拉取官方最新版作为基线，并重新构建 |
 | `make vendor-from FROM=~/x.crx` | 从本地 crx / zip / 解压目录导入基线 |
 | `make clean` | 删除 `dist/` |
@@ -177,13 +192,13 @@ Linglass-Pro/
 │   ├── dev.mjs             监听 + 自动重建 + 通过 SW 触发扩展重载
 │   ├── import-vendor.mjs   从商店 / 本地导入官方基线
 │   ├── install.mjs         一键安装器：下载基线 + 构建 + 打开向导
-│   ├── package.mjs         打发布包（白名单 + 合规自检）
+│   ├── package.mjs         打两个发布包（完整版 / 安装器版，含结构自检）
 │   ├── probe.mjs           CDP 探针：在真实浏览器里读 Linglass 的内部数据
 │   ├── zip.mjs             手写 zip 读写（零依赖：解 CRX 与打发布包共用）
 │   └── test/               契约 contract / 冒烟 smoke / 断句 ja-segment
-│                           / zip 与安装器 zip + install
+│                           / zip / 安装器 install / 打包 package
 ├── vendor/                 官方基线（只读，不进版本控制）
-├── release/                一键安装包产物（不进版本控制）
+├── release/                两个安装包的产物（不进版本控制）
 └── dist/                   构建产物（可加载的完整扩展，不进版本控制）
 ```
 
@@ -207,19 +222,19 @@ Linglass-Pro/
 
 ## 验证方式
 
-`make test`（`node --test tools/test/*.test.mjs`，零依赖）包含四组，当前 **99 例全绿**：
+`make test`（`node --test tools/test/*.test.mjs`，零依赖）包含五组，当前 **107 例全绿**：
 
 ```text
 $ make test
-ℹ tests 99
-ℹ pass 99
+ℹ tests 107
+ℹ pass 107
 ℹ fail 0
 ```
 
 - **契约测试**（`contract.test.mjs`）—— 断言我们对官方产物与 YouTube 平台的所有依赖仍然成立（DOM class、shadowRoot 模式、点击处理器的短路行为、面板的裁剪机制）。它从源码里提取我们实际用到的选择器，而不是读一份手写清单；新增对官方 DOM 的依赖必须登记进来。
 - **冒烟测试**（`smoke.test.mjs`）—— 用 `node:vm` 开沙箱、把 `document` / `chrome` / `MutationObserver` 换成桩件，把 `src/mod/*.js` 原封不动跑起来，覆盖时间轴推导、去重、暂停保护、注音与断句共存、导出格式、常驻语义等。
 - **断句规则测试**（`ja-segment.test.mjs`）—— 纯函数模块单独一个文件，喂空沙箱直接驱动 `cut()`，逐条对齐上面那张切分口径表；除具体切分外还断言一条与实现无关的不变量：切点严格升序且拼回去等于原文。
-- **zip 与安装器测试**（`zip.test.mjs` / `install.test.mjs`）—— 手写 zip 的往返、可执行位恢复、zip slip 与 zip64 边界、CRC 对已知向量校准；以及安装器里那张「候选浏览器」表 —— 路径或顺序写错的表现是「用户双击后什么都不弹」，不会报错，所以单独锁住。
+- **工具链测试**（`zip.test.mjs` / `install.test.mjs` / `package.test.mjs`）—— 手写 zip 的往返、可执行位恢复、zip slip 与 zip64 边界、CRC 对已知向量校准；安装器里那张「候选浏览器」表；以及打包结果的结构 —— 完整包有没有内嵌一层、`manifest.json` 在不在那一层的根、官方只动小版本时两个包的文件名会不会撞。这三处的共同点是**错了也不会报错**（用户双击后什么都不弹 / 解压摊一地 / 加载扩展直接失败），所以只能靠测试锁住。
 
 浏览器内的视觉与交互行为（面板滑入、浮窗是否真的留在桌面、MutationObserver 的真实时序）**Node 测不了**，属于人工确认范围；`make probe`（CDP 驱动真实浏览器）可以半自动地跑一部分。
 
@@ -231,7 +246,7 @@ $ make test
 - 面板在**播放页**寄生进 YouTube 的推荐列，宽度交给 YouTube 自己算，所以不遮挡任何东西；**其它页面**（首页 / 搜索页没有那一列）退回「右侧悬浮 + 页面让位」，那种形态下面板会收窄页面、并在视频全屏时自动收起。
 - 句级时间戳的精度取决于 MutationObserver 的触发时刻（就是字幕切换那一瞬）；官方不暴露内部 cue 时间轴，**词级时间戳拿不到**，词级进度只能用句内线性插值近似。
 - 运行的是官方商店下发的产物，所以桌面字幕浮窗依赖浏览器的 `documentPictureInPicture`（Chromium 116+，Arc 可用）。
-- **一键安装包需要对方先装一次 Node.js**：彻底免 Node 要么重写整套构建，要么让安装器自己下载便携版 Node（约 40MB/平台，Windows 侧还得先解决「没有解压器」的鸡生蛋）—— 当前是刻意的取舍，见 [`docs/plans/023-one-click-installer.md`](docs/plans/023-one-click-installer.md)。
+- **「免 Node」和「干净」只能选一个**：安装器版要对方先装一次 Node.js；不依赖 Node 的完整版就得把官方代码一起发出去（见上面「只想装上用」一节的 ⚠️）。「不装 Node」且「不含官方代码」是做不到的 —— 官方代码总得从某处来，要么从对方机器上取，要么由我们带过去。两条路各自的取舍见 [`docs/plans/023-one-click-installer.md`](docs/plans/023-one-click-installer.md) 与 [`024-download-and-run-package.md`](docs/plans/024-download-and-run-package.md)。
 - **官方发新版不会自动同步**：用户要重新双击一次安装文件，再在扩展管理页点一下刷新。
 
 ## 开发约定
