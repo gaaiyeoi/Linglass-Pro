@@ -106,6 +106,16 @@
   const BAR_HEIGHT = 48;
   /** #stage 的上内边距（与 PIP_BASE_CSS 一致） */
   const STAGE_PAD_TOP = 8;
+  /** #stage 的段间距（与 PIP_BASE_CSS 的 gap 一致）—— 上下文行数变化时高度要算进去 */
+  const STAGE_GAP = 8;
+  /**
+   * 上下文行（上一句 / 下一句）相对当前句的字号比例与不透明度。
+   *
+   * 比当前句小一号、淡一半：上下文是用来「扫一眼」的，抢了当前句的对比就没法读了。
+   * 这两个数是刻意的固定值，不进样式条（PLAN 029 的「不做什么」）。
+   */
+  const CTX_FONT_RATIO = 0.8;
+  const CTX_OPACITY = 0.55;
   /** 字幕行的 line-height（与 PIP_BASE_CSS 的 #line-* 一致） */
   const LINE_HEIGHT = 1.3;
   /**
@@ -203,6 +213,14 @@
   /** #RRGGBB（落盘里的颜色要过这一关才用） */
   const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
+  /**
+   * 上下文行数（PLAN 029）：0 = 只看当前句（旧样子）、1 = 当前句 + 下一句、2 = 上一句 + 当前 + 下一句。
+   * 默认 1：多给一句「下一句」最有价值，而「上一句」要看的人会自己再点一下。
+   */
+  const CTX_MIN = 0;
+  const CTX_MAX = 2;
+  const CTX_DEFAULT = 1;
+
   /** 官方 f.classic.font 等字体栈 */
   const FONT_SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
   const FONT_COMIC_LATIN = '"Trebuchet MS", "Segoe UI", Verdana, system-ui, sans-serif';
@@ -242,9 +260,16 @@
     scale: 100,
     color: '#FFFFFF',
     dual: true,
+    ctxLines: CTX_DEFAULT,
     primaryLang: null,
     secondaryLang: null,
   };
+
+  /** 上下文行档位夹取：0 / 1 / 2，别的值一律走默认（落盘被写坏时兜住） */
+  function clampCtxLines(value) {
+    if (!Number.isFinite(value)) return CTX_DEFAULT;
+    return Math.min(CTX_MAX, Math.max(CTX_MIN, Math.round(value)));
+  }
 
   /** 字号夹到档位表上：落盘被写坏、或以后改档位表时都从这里兜住 */
   function clampScale(value) {
@@ -284,6 +309,7 @@
         ? raw.color.toUpperCase()
         : DEFAULT_APPEARANCE.color,
       dual: typeof raw.dual === 'boolean' ? raw.dual : DEFAULT_APPEARANCE.dual,
+      ctxLines: clampCtxLines(raw.ctxLines),
     };
   }
 
@@ -446,6 +472,15 @@
       if (target.dual) inner += 2 * padY + LINE_GAP * size.base;
     }
 
+    // 上下文行（PLAN 029）：每段 = 原文行 × 0.8 +（开双语时的）译文行 × 0.8，
+    // 再加一个 #stage 的 gap。不画底板，所以没有内边距要算
+    const ctx = clampCtxLines(target.ctxLines);
+    if (ctx > 0) {
+      let perCtx = size.primary * CTX_FONT_RATIO * LINE_HEIGHT;
+      if (target.dual) perCtx += size.secondary * CTX_FONT_RATIO * LINE_HEIGHT;
+      inner += ctx * (perCtx + STAGE_GAP);
+    }
+
     return Math.ceil(BAR_HEIGHT + STAGE_PAD_TOP + inner + PIP_HEIGHT_SLACK);
   }
 
@@ -559,6 +594,12 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 #fill-secondary { background: rgba(10, 132, 255, .11); }
 #line-primary, #line-secondary { position: relative; display: block;
   line-height: 1.3; text-align: center; white-space: pre-wrap; }
+/* 上下文行（PLAN 029）：上一句 / 下一句各占一块，块内原文一行 + 译文一行。
+   字号与不透明度由 pipCss() 按当前外观生成（比当前句小一档、淡一半）。
+   刻意不画底板、不带进度填充：底板与填充是「正在读的那句」的专属。 */
+.ctx { display: flex; flex-direction: column; align-items: center;
+  max-width: 100%; min-width: 0; }
+.ctx-line { display: block; line-height: 1.3; text-align: center; white-space: pre-wrap; }
 #stage:not(:has(#line-primary:not(:empty)))::before {
   content: "— 等待 Linglass 字幕 —";
   font-size: 15px; font-weight: 400; color: #7a7a80; letter-spacing: .04em; }
@@ -629,6 +670,18 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 #line-secondary { font-family: ${fontStackOf(spec, target.secondaryLang)};
   font-size: ${round1(size.secondary)}px; font-weight: ${spec.secondaryWeight};
   letter-spacing: ${letterSpacing}; color: ${secondaryColor};
+  text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
+  -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
+/* 上下文行（PLAN 029）：同一套字体栈 / 描边 / 阴影，只把字号压到 0.8×、整块压到 55% 透明度。
+   注音不会有（官方只有当前句渲染 <ruby>），底板与进度填充也不给（见 PIP_BASE_CSS 的 .ctx） */
+#prev-primary, #next-primary { font-family: ${fontStackOf(spec, target.primaryLang)};
+  font-size: ${round1(size.primary * CTX_FONT_RATIO)}px; font-weight: ${primaryWeightOf(spec, target)};
+  letter-spacing: ${letterSpacing}; color: ${target.color}; opacity: ${CTX_OPACITY};
+  text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
+  -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
+#prev-secondary, #next-secondary { font-family: ${fontStackOf(spec, target.secondaryLang)};
+  font-size: ${round1(size.secondary * CTX_FONT_RATIO)}px; font-weight: ${spec.secondaryWeight};
+  letter-spacing: ${letterSpacing}; color: ${secondaryColor}; opacity: ${CTX_OPACITY};
   text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
   -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
 /* 振假名：只有官方这行本来就渲染了 <rt> 时才会出现（跟随官方，见 pushText 的 richTokens）。
@@ -738,7 +791,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
    * 变成「重新播种」（PLAN 027 的完全独立口径）。
    */
   function resetAppearance() {
-    setOwn(seedFrom(officialAppearance));
+    // ctxLines 不是官方外观页的维度 —— 「把官方那套请回来」不该顺手抹掉用户调的行数
+    setOwn({ ...seedFrom(officialAppearance), ctxLines: own.ctxLines });
   }
 
   /**
@@ -799,8 +853,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let styleEl = null;
   /** 当前生效的外观 = 浮窗自己的四项 + 跟随官方的语言（见 composeAppearance） */
   let appearance = { ...DEFAULT_APPEARANCE };
-  /** 浮窗自己持有的四项外观（落盘的唯一真相，见「浮窗外观」一节） */
-  let own = ownOf(DEFAULT_APPEARANCE);
+  /** 浮窗自己持有的外观（落盘的唯一真相，见「浮窗外观」一节）：四项 + 上下文行数 */
+  let own = { ...ownOf(DEFAULT_APPEARANCE), ctxLines: CTX_DEFAULT };
   /** 跟随官方的语言（学习语言 / 母语） */
   let langs = { primaryLang: null, secondaryLang: null };
   /** 最近一次读到的官方外观：只用于语言跟随与复位时的「重新播种」 */
@@ -1060,6 +1114,42 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     line.replaceChildren(...nodes);
   }
 
+  /**
+   * 相邻的那一句（-1 = 上一句、+1 = 下一句）。
+   *
+   * 原文来自整条轨（官方写进 local 的整轨缓存 + 直播采样），**译文只有这句被播到过才有**
+   * —— 见 10-subtitle-track.js 的 fromSkeleton()：缓存里只有原文。
+   * 所以「下一句」常常只有原文，这不是 bug，是拿不到。
+   */
+  function contextCue(offset) {
+    const current = track.getCurrent();
+    if (!current || current.index == null) return null;
+    const cue = (track.getCues() || [])[current.index + offset];
+    if (!cue) return null;
+    return {
+      primary: cue.primary || '',
+      secondary: appearance.dual ? cue.secondary || '' : '',
+    };
+  }
+
+  /** 把一段上下文行写进 DOM：没内容（或档位不够）就整段收起来，不留空行 */
+  function pushContext(id, visible, text) {
+    const d = pipWin.document;
+    const block = d.getElementById(id);
+    if (!block) return;
+    if (!visible || !text || !text.primary) {
+      // 原文那行是「片段 → 子节点」渲染出来的，收起来时要把节点清掉（不只是清文本）
+      const primaryEl = d.getElementById(`${id}-primary`);
+      if (primaryEl) primaryEl.replaceChildren();
+      setText(d.getElementById(`${id}-secondary`), '');
+      show(block, false);
+      return;
+    }
+    renderSegments(d.getElementById(`${id}-primary`), primaryParts(text.primary));
+    setText(d.getElementById(`${id}-secondary`), text.secondary);
+    show(block, true);
+  }
+
   function pushText() {
     if (!pipWin) return;
 
@@ -1069,10 +1159,20 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     const parts = tokens ? null : primaryParts(lines.primary);
     // 双语关掉时官方也不显示译文行 —— 浮窗跟着它，别自作主张多给一行
     const secondary = appearance.dual ? lines.secondary : '';
-    // 注音形态 / 分隔符开关 / 双语开关都进键：用户中途改设置时浮窗要重绘
+    // 上下文行：档位 0 时两段都收起来；1 = 只给下一句；2 = 上下都给
+    const ctx = clampCtxLines(appearance.ctxLines);
+    const prev = ctx >= 2 ? contextCue(-1) : null;
+    const next = ctx >= 1 ? contextCue(1) : null;
+    // 注音形态 / 分隔符开关 / 双语开关 / 上下文行都进键：用户中途改设置时浮窗要重绘。
+    // 上下文行进键的是**切好的片段**（不是原始文本）：断句开关一关一开、哪怕原文一字没变，
+    // 渲染结果也不同 —— 拿原文进键会让「上一句 / 下一句」留在旧的分隔符形态上。
+    const ctxKey = (cue) => (cue
+      ? `${primaryParts(cue.primary).map((part) => part.text).join('\u0001')}\u0002${cue.secondary}`
+      : '');
+    const ctxPart = `${ctx}\u0003${ctxKey(prev)}\u0003${ctxKey(next)}`;
     const key = tokens
-      ? `r\u0001${tokens.map((token) => `${token.text}\u0002${token.ruby || ''}`).join('\u0001')}\u0000${secondary}`
-      : `${parts.map((part) => part.text).join('\u0001')}\u0000${secondary}`;
+      ? `r\u0001${tokens.map((token) => `${token.text}\u0002${token.ruby || ''}`).join('\u0001')}\u0000${secondary}${ctxPart}`
+      : `${parts.map((part) => part.text).join('\u0001')}\u0000${secondary}${ctxPart}`;
     if (key === lastKey) return;
     lastKey = key;
 
@@ -1081,6 +1181,9 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     if (tokens) renderRichSegments(line, richSegments(tokens, cuePoints(lines.primary)));
     else renderSegments(line, parts);
     setText(d.getElementById('line-secondary'), secondary);
+
+    pushContext('prev', ctx >= 2, prev);
+    pushContext('next', ctx >= 1, next);
   }
 
   /**
@@ -1164,6 +1267,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
         return true;
       case 'dual':
         setOwn({ dual: !own.dual });
+        return true;
+      case 'ctx':
+        // 0 → 1 → 2 → 0：只看当前句 / 加下一句 / 上下都给
+        setOwn({ ctxLines: (clampCtxLines(own.ctxLines) + 1) % (CTX_MAX + 1) });
         return true;
       case 'reset':
         resetAppearance();
@@ -1299,13 +1406,16 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     if (barMode === 'style') syncStyleBar();
   }
 
-  /** 样式条的回显：档位数字、选中的预设与色块、双语按钮的开启态 */
+  /** 样式条的回显：档位数字、选中的预设与色块、双语按钮与上下文行数的开启态 */
   function syncStyleBar() {
     if (!pipWin || !styleNodes) return;
     setText(styleNodes.value, `${own.scale}%`);
     for (const [name, btn] of styleNodes.presets) markOn(btn, own.style === name);
     for (const [hex, btn] of styleNodes.colors) markOn(btn, own.color === hex);
     markOn(styleNodes.dual, own.dual);
+    // 上下文行数直接把档位写在按钮上（≡0 / ≡1 / ≡2），0 时不当成「开启态」
+    setText(styleNodes.ctx, `≡${clampCtxLines(own.ctxLines)}`);
+    markOn(styleNodes.ctx, clampCtxLines(own.ctxLines) > 0);
   }
 
   /** 样式条的按钮：act 就是 command() 认的动作串；id 只为测试与 probe 能按名字取到它 */
@@ -1346,6 +1456,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     }
 
     nodes.dual = add('dual', 'CC', '双语字幕', 'pip-dual');
+    // 上下文行数（PLAN 029）：循环 0/1/2，按钮上直接显示当前档
+    nodes.ctx = add('ctx', `≡${CTX_DEFAULT}`, '上下文行数 0 / 1 / 2（点击循环）', 'pip-ctx');
     add('reset', '↺', '恢复为官方当前设置', 'pip-reset');
     add('appearance', '✓', '收起样式设置', 'pip-collapse');
 
@@ -1634,7 +1746,25 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       wrap.append(fill, text);
       plate.append(wrap);
     }
-    stage.append(plate);
+
+    // 上下文行（PLAN 029）：当前句上面一段「上一句」、下面一段「下一句」。
+    // 结构与当前句刻意不同 —— 它们没有底板、没有进度填充（那两样属于正在读的那句）
+    const ctxBlock = (side) => {
+      const block = d.createElement('div');
+      block.className = 'ctx';
+      block.id = side;
+      for (const kind of ['primary', 'secondary']) {
+        const text = d.createElement('span');
+        text.className = 'ctx-line';
+        text.id = `${side}-${kind}`;
+        block.append(text);
+      }
+      return block;
+    };
+    const prev = ctxBlock('prev');
+    const next = ctxBlock('next');
+
+    stage.append(prev, plate, next);
 
     const bar = d.createElement('div');
     bar.id = 'bar';
@@ -1786,6 +1916,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       barMode: () => barMode,
       STYLE_CHOICES,
       COLOR_PRESETS,
+      // 上下文行（PLAN 029）：给测试留一个按偏移取相邻句的直入口（-1 上一句 / +1 下一句）
+      contextText: (offset) => contextCue(offset),
+      CTX_DEFAULT,
+      CTX_MAX,
       // 播放控制：测试与 probe 直接驱动 command()，不必模拟浮窗里的点击
       command,
       syncBar,

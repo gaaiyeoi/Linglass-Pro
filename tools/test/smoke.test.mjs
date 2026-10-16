@@ -775,6 +775,16 @@ async function harness({
     const line = win && win.document.getElementById('line-primary');
     return line ? pipPlain(line) : null;
   };
+  /**
+   * 任意一行的纯文本（与 pipText 同一口径：分隔符拼进去、注音不算）。
+   * 上下文行（#prev-* / #next-*）走的是「片段 → 子节点」那条渲染路径，
+   * 桩件的 textContent 不会汇总子节点，所以断言必须走 pipPlain。
+   */
+  h.pipLineText = (id) => {
+    const win = h.lastPipWindow();
+    const el = win && win.document.getElementById(id);
+    return el ? pipPlain(el) : null;
+  };
   /** 原文行的片段结构（文本 / 分隔符 / 注音），用来断言分隔符独立成节点、注音成 ruby */
   h.pipSegments = () => {
     const win = h.lastPipWindow();
@@ -2453,7 +2463,7 @@ test('桌面字幕：浮窗外观首次从官方拷来当初始值，之后官�
   const seeded = h.saved.find((entry) => entry.llgPipAppearance);
   assert.ok(seeded, '首次打开要把官方的当前值播种进落盘');
   assert.deepEqual({ ...seeded.llgPipAppearance },
-    { style: 'classic', scale: 100, color: '#FFFFFF', dual: true });
+    { style: 'classic', scale: 100, color: '#FFFFFF', dual: true, ctxLines: pip.CTX_DEFAULT });
 
   // 官方那边怎么改都不动了（PLAN 027：浮窗完全独立）
   h.changeSettings(withAppearance({ subtitleScale: 150, subtitleColor: '#FFD60A' }));
@@ -2528,9 +2538,10 @@ test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async (
   h.gesture();
   await h.drain();
 
-  // 100% 档 + classic 底板 + 双语：两行字幕 + 控制栏 ≈ 145px（旧的 264 上下各留一大块空白）
+  // 100% 档 + classic 底板 + 双语 + 默认 1 段上下文行（下一句的原文与译文各 ×0.8）≈ 202px
+  // （旧的 264 上下各留一大块空白；只有当前句时是 145px 上下）
   const fit = h.pip.lastOptions;
-  assert.ok(fit.height > 120 && fit.height < 180, `默认高度要贴合内容，实际 ${fit.height}`);
+  assert.ok(fit.height > 180 && fit.height < 230, `默认高度要贴合内容，实际 ${fit.height}`);
   assert.ok(fit.width < 1000, '宽度不该再留一大块黑边');
 
   // 字号不跟窗口走 → 窗口就得跟字号走：150% 档那次开窗必须明显更高
@@ -2540,6 +2551,26 @@ test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async (
   assert.ok(
     big.h.pip.lastOptions.height > fit.height + 10,
     `档位调大后默认高度要跟着长（${big.h.pip.lastOptions.height} vs ${fit.height}）`,
+  );
+
+  // 上下文行数也要进高度（PLAN 029）：少了矮一截，多了高一截
+  const asOwn = (ctxLines) => ({
+    llgPipAppearance: { style: 'classic', scale: 100, color: '#FFFFFF', dual: true, ctxLines },
+  });
+  const none = await harness({ withPip: true, settings: APPEARANCE, stored: asOwn(0) });
+  none.h.gesture();
+  await none.h.drain();
+  assert.ok(
+    none.h.pip.lastOptions.height < fit.height - 30,
+    `contextLines=0 该矮一截（${none.h.pip.lastOptions.height} vs ${fit.height}）`,
+  );
+
+  const both = await harness({ withPip: true, settings: APPEARANCE, stored: asOwn(2) });
+  both.h.gesture();
+  await both.h.drain();
+  assert.ok(
+    both.h.pip.lastOptions.height > fit.height + 30,
+    `contextLines=2 该高一截（${both.h.pip.lastOptions.height} vs ${fit.height}）`,
   );
 });
 
@@ -2690,11 +2721,18 @@ test('桌面字幕：落盘里的浮窗外观被写坏时逐项夹回合法值',
   await h.drain();
 
   assert.deepEqual({ ...pip.appearanceOwn() },
-    { style: 'classic', scale: 150, color: '#FFFFFF', dual: true }, '逐项兜底，不是整份丢掉');
+    { style: 'classic', scale: 150, color: '#FFFFFF', dual: true, ctxLines: pip.CTX_DEFAULT },
+    '逐项兜底，不是整份丢掉');
 
-  // 一半坏一半好：好的那项要保住
+  // 一半坏一半好：好的那项要保住（上下文行数不在落盘里 → 走默认 1）
   assert.deepEqual({ ...pip.parseOwn({ style: 'cinema', scale: 'x' }) },
-    { style: 'cinema', scale: 100, color: '#FFFFFF', dual: true });
+    { style: 'cinema', scale: 100, color: '#FFFFFF', dual: true, ctxLines: 1 });
+
+  // 上下文行数也要夹：负数 / 99 / 小数 / 字符串都不许原样进来
+  assert.equal(pip.parseOwn({ ctxLines: -5 }).ctxLines, 0);
+  assert.equal(pip.parseOwn({ ctxLines: 99 }).ctxLines, pip.CTX_MAX);
+  assert.equal(pip.parseOwn({ ctxLines: 1.4 }).ctxLines, 1);
+  assert.equal(pip.parseOwn({ ctxLines: '2' }).ctxLines, pip.CTX_DEFAULT, '字符串不当数字用');
 
   // 整个值读不成 / 压根没存过（首次打开）→ null，交给调用方拿官方播种
   assert.equal(pip.parseOwn(null), null);
@@ -2741,6 +2779,147 @@ test('桌面字幕：浮窗进度条按新的分母走', async () => {
   h.currentTime = 13;
   h.tick();
   assert.equal(h.pipFill(), '50%', '3 / 6，而不是旧实现的 100%');
+});
+
+// ---------------------------------------------------------------- 浮窗的上下文行
+
+test('桌面字幕：默认只显示下一句，且下一句只有原文（译文要等它被播到过）', async () => {
+  const { h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
+  h.jaBreakEnabled = false;
+  await h.drain();
+  await h.drain();
+
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  assert.equal(h.pipText(), 'おはよう');
+  assert.equal(h.pipButton('line-secondary').textContent, '早安');
+
+  // 默认档位 1 = 当前句 + 下一句
+  assert.equal(h.pipButton('next').style.display, '', '默认要显示下一句');
+  assert.equal(h.pipLineText('next-primary'), 'きょうは あめ です', '原文来自整条轨');
+  assert.equal(h.pipLineText('next-secondary'), '',
+    '官方缓存里没有译文 —— 这句还没被播到过');
+  assert.equal(h.pipButton('prev').style.display, 'none', '档位 1 时上一句要收起来');
+
+  // 上下文行：字号 0.8×、不透明度 55%，且不给底板 / 不给注音
+  assert.match(h.pipCss(), /#next-primary \{[^}]*font-size: 21\.6px/, '27 × 0.8');
+  assert.match(h.pipCss(), /#next-secondary \{[^}]*font-size: 16px/, '20 × 0.8');
+  assert.match(h.pipCss(), /#next-primary \{[^}]*opacity: 0\.55/);
+  assert.doesNotMatch(h.pipCss(), /#prev \{[^}]*background/, '上下文行不画底板');
+});
+
+test('桌面字幕：档位拉到 2 时上一句也显示，并带上它刚采到的译文', async () => {
+  const { sandbox, h } = await harness({
+    withPip: true,
+    settings: APPEARANCE,
+    stored: {
+      ...officialCache(SKELETON_CUES),
+      llgPipAppearance: { style: 'classic', scale: 100, color: '#FFFFFF', dual: true, ctxLines: 2 },
+    },
+  });
+  const pip = sandbox.__llgModPip;
+  h.jaBreakEnabled = false;
+  await h.drain();
+  await h.drain();
+
+  // 播两句：第一句采到译文，第二句成为当前句
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+  h.currentTime = 3;
+  show(h, 'きょうは あめ です', '今天下雨');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  assert.equal(h.pipText(), 'きょうは あめ です');
+  assert.equal(h.pipButton('line-secondary').textContent, '今天下雨');
+
+  // 上一句：原文 + 它刚采到的译文（刚播过 → 有）
+  assert.equal(h.pipButton('prev').style.display, '');
+  assert.equal(h.pipLineText('prev-primary'), 'おはよう');
+  assert.equal(h.pipButton('prev-secondary').textContent, '早安');
+
+  // 下一句：骨架有原文、没译文 → 只渲染原文
+  assert.equal(h.pipButton('next').style.display, '');
+  assert.equal(h.pipLineText('next-primary'), 'あしたは はれ です');
+  assert.equal(h.pipButton('next-secondary').textContent, '');
+
+  // 同一个入口对外也暴露（探针与测试共用），边界处给 null
+  assert.equal(pip.contextText(-1).primary, 'おはよう');
+  assert.equal(pip.contextText(1).secondary, '');
+  assert.equal(pip.contextText(-99), null);
+});
+
+test('桌面字幕：≡ 循环 0/1/2 并落盘，0 时两段上下文都收起来', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
+  const pip = sandbox.__llgModPip;
+  h.jaBreakEnabled = false;
+  await h.drain();
+  await h.drain();
+
+  // 播到第二句：这样「上一句」存在（第一句没有上一句），档位切换才有东西可显
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+  h.currentTime = 3;
+  show(h, 'きょうは あめ です', '今天下雨');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  assert.equal(pip.appearanceOwn().ctxLines, pip.CTX_DEFAULT, '默认 1：只看下一句');
+  assert.equal(h.pipButton('pip-ctx').textContent, '≡1', '按钮上要写档位');
+  assert.equal(h.pipButton('pip-ctx').dataset.on, '1', '开了上下文才算选中态');
+
+  h.pipClick('ctx'); // 1 → 2
+  assert.equal(pip.appearanceOwn().ctxLines, 2);
+  assert.equal(h.pipButton('pip-ctx').textContent, '≡2');
+  assert.equal(h.pipButton('prev').style.display, '', '2 段：上一句要出来');
+  assert.equal(h.saved.at(-1).llgPipAppearance.ctxLines, 2, '改一下就要落盘');
+
+  // ↺ 复位只把官方那套请回来，不该顺手抹掉用户调的行数
+  h.pipClick('reset');
+  assert.equal(pip.appearanceOwn().ctxLines, 2, '复位不动上下文行数');
+
+  h.pipClick('ctx'); // 2 → 0
+  assert.equal(pip.appearanceOwn().ctxLines, 0);
+  assert.equal(h.pipButton('pip-ctx').textContent, '≡0');
+  assert.equal(h.pipButton('pip-ctx').dataset.on, undefined, '0 不算选中');
+  assert.equal(h.pipButton('prev').style.display, 'none');
+  assert.equal(h.pipButton('next').style.display, 'none', '0 段时下一句也要收起来');
+  assert.equal(h.pipLineText('next-primary'), '', '收起时要清掉文本');
+
+  h.pipClick('ctx'); // 0 → 1
+  assert.equal(pip.appearanceOwn().ctxLines, 1);
+  assert.equal(h.saved.at(-1).llgPipAppearance.ctxLines, 1);
+});
+
+test('桌面字幕：上下文行的断句跟随视频内那个开关', async () => {
+  const { h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  // 开关开着：上下文行也按文节切开，分隔符独立成节点（与当前句同一套规则）
+  const win = h.lastPipWindow();
+  const next = win.document.getElementById('next-primary');
+  const seps = (next.children || []).filter((kid) => kid.className === 'llg-sep');
+  assert.ok(seps.length >= 1, `下一句要切成文节，实际分隔符 ${seps.length} 个`);
+  assert.ok(h.pipLineText('next-primary').includes('|'),
+    `上下文行的分隔符要拼进文本，实际 ${h.pipLineText('next-primary')}`);
+
+  // 中途关掉 → 心跳把上下文行也重绘成干净原文
+  h.jaBreakEnabled = false;
+  h.tick();
+  assert.equal(h.pipLineText('next-primary'), 'きょうは あめ です');
 });
 
 // ---------------------------------------------------------------- 浮窗播放控制
