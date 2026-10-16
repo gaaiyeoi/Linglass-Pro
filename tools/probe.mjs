@@ -142,26 +142,38 @@ class Cdp {
   }
 }
 
+/**
+ * 调试端口的候选地址。
+ *
+ * 为什么不能只试 127.0.0.1：**复用已有 Arc 实例时它只监听 IPv6** —— 实测
+ * `lsof` 显示 `[::1]:9335 (LISTEN)`，此时 `curl 127.0.0.1:9335` 直接连不上（000），
+ * 而 `curl [::1]:9335` 是 200。只试 IPv4 会报一个很误导的「连不上调试端口：fetch failed」。
+ */
+const CDP_HOSTS = ['127.0.0.1', '[::1]'];
+
 async function connect() {
   const deadline = Date.now() + 20000;
   let lastErr = null;
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/version`);
-      const info = await res.json();
-      const ws = new WebSocket(info.webSocketDebuggerUrl);
-      await new Promise((resolve, reject) => {
-        ws.addEventListener('open', resolve, { once: true });
-        ws.addEventListener('error', reject, { once: true });
-        setTimeout(() => reject(new Error('WebSocket 连接超时')), 10000);
-      });
-      return new Cdp(ws);
-    } catch (err) {
-      lastErr = err;
-      await sleep(400);
+    for (const host of CDP_HOSTS) {
+      try {
+        const res = await fetch(`http://${host}:${PORT}/json/version`);
+        const info = await res.json();
+        const ws = new WebSocket(info.webSocketDebuggerUrl);
+        await new Promise((resolve, reject) => {
+          ws.addEventListener('open', resolve, { once: true });
+          ws.addEventListener('error', reject, { once: true });
+          setTimeout(() => reject(new Error('WebSocket 连接超时')), 10000);
+        });
+        return new Cdp(ws);
+      } catch (err) {
+        // 这个地址不通就换下一个；两个都不通时把最后一条错误带出去
+        lastErr = err;
+      }
     }
+    await sleep(400);
   }
-  throw new Error(`连不上调试端口 ${PORT}：${lastErr && lastErr.message}`);
+  throw new Error(`连不上调试端口 ${PORT}（试了 ${CDP_HOSTS.join(' / ')}）：${lastErr && lastErr.message}`);
 }
 
 /** 在某个页面里求值；不传 contextId 就是页面 world */
@@ -188,6 +200,87 @@ async function evaluate(cdp, sessionId, expression, contextId) {
 
 function rule(title) {
   console.log(`\n${'─'.repeat(4)} ${title} ${'─'.repeat(Math.max(0, 56 - title.length))}`);
+}
+
+/**
+ * 把候选规则对比的结果打成人眼能并排看的一行一条。
+ * `clearance` 是「面板左边缘 − 视频右边缘」：正数 = 视频完全在面板左边（不遮挡），
+ * 负数就是被压了多少像素。
+ */
+function printLayoutCompare(label, data) {
+  if (!data || !data.candidates) {
+    console.log(`[probe] ${label}: ${JSON.stringify(data)}`);
+    return;
+  }
+  console.log(`[probe] ${label}  viewport=${data.viewport.w}×${data.viewport.h}`
+    + ` theater=${data.theater} fullscreen=${data.documentFullscreen} panelW=${data.panelWidth}`);
+
+  const row = (name, m) => {
+    const span = (r) => (r ? `${r.left}..${r.right}` : '-');
+    // 除了 video（要求不重叠），还要看 #secondary（推荐列）：它伸到面板底下同样是遮挡
+    console.log(`[probe]   ${String(name).padEnd(28)} overlap=${String(m.overlap).padEnd(5)}`
+      + ` clearance=${String(m.clearance).padStart(5)}`
+      + ` video=[${span(m.video)}]`
+      + ` primary=[${span(m.primary)}] secondary=[${span(m.secondary)}]`
+      + ` columns=[${span(m.columns)}] mastheadRight=${m.masthead ? m.masthead.right : '-'}`);
+  };
+  if (data.boxes) {
+    for (const [name, box] of Object.entries(data.boxes)) {
+      if (!box) continue;
+      console.log(`[probe]   ${name.padEnd(10)} rect=${box.rect.padEnd(12)}`
+        + ` width=${box.width} min=${box.minWidth} max=${box.maxWidth}`
+        + ` flex=${box.flex} padR=${box.paddingRight} overflowX=${box.overflowX}`);
+    }
+  }
+
+  // 注意：面板是**用真实按钮点开**的，所以我们的让位样式此时已经注入 ——
+  // 这一行就是「我们现在的实现」的实测结果；下面的候选是覆盖在它之上的对照。
+  row('baseline(现状)', data.baseline);
+  for (const candidate of data.candidates) row(candidate.name, candidate);
+}
+
+/**
+ * 面板压住了谁 —— 一次性把「面板 vs 页面内容」的量测打成几行。
+ *
+ * 为什么不能只看 clearance（面板左边缘 − video 右边缘）：那条只证明视频让开了。
+ * 面板是 fixed 全高、贴在右边缘的，而推荐列（#secondary）的宽度由 YouTube 自己定、
+ * 不跟着容器缩 —— 所以「video 让开了」完全可能与「推荐列被压在面板底下」同时成立。
+ * 这个函数就是回答「面板到底压住了谁」的。
+ */
+function printPanelVsPage(label, data) {
+  const p = data && data.panel;
+  if (!p) {
+    console.log(`[probe] ${label}: 面板不在（panelState=${data ? data.panelState : '-'}）`);
+    return;
+  }
+
+  const viewport = data.viewport ? `${data.viewport.w}×${data.viewport.h}` : '-';
+  console.log(`[probe] ${label}  viewport=${viewport}`
+    + ` panel=[${p.left}..${p.right}] (${p.width}px)`);
+
+  const targets = [
+    ['#movie_player', data.layout && data.layout.player],
+    ['#columns', data.layout && data.layout.columns],
+    ['#secondary', data.layout && data.layout.secondary],
+    ['#masthead', data.layout && data.layout.masthead],
+  ];
+
+  for (const [name, rect] of targets) {
+    if (!rect) {
+      console.log(`[probe]   ${name.padEnd(14)} -`);
+      continue;
+    }
+    const horizontal = rect.right > p.left && rect.left < p.right;
+    const vertical = rect.bottom > p.top && rect.top < p.bottom;
+    // inside：面板整个落在这一块里面。列形态下这是**想要的**结果 ——
+    // 面板寄生在 `#secondary` 里，与它相交是天经地义，不代表遮挡了别的东西。
+    const inside = rect.left <= p.left && p.right <= rect.right
+      && rect.top <= p.top && p.bottom <= rect.bottom;
+    console.log(`[probe]   ${name.padEnd(14)} [${rect.left}..${rect.right}]`
+      + ` overlap=${horizontal && vertical}`
+      + ` inside=${inside}`
+      + ` clearance=${Math.round(p.left - rect.right)}`);
+  }
 }
 
 /** 等到 document.readyState 变成 complete；SPA 的内容还要额外等一会儿 */
@@ -302,6 +395,266 @@ const PANEL_PROBE = `(() => {
   };
 })()`;
 
+/**
+ * 布局探针：面板打开后，它和视频到底谁压着谁。
+ *
+ * 「不遮挡视频」这条需求在 Node 侧完全测不了（要真浏览器的真实排版），
+ * 所以这里是它唯一的验收手段：量面板矩形与视频矩形是否相交，并顺带把
+ * YouTube 的几种布局（默认 / 剧场 / 全屏）与让位用的 DOM 事实一起 dump 出来，
+ * 方便改规则时不用靠猜。会自己把面板点开（已经开着就不点，免得反手关掉）。
+ */
+const LAYOUT_PROBE = `(async () => {
+  const pick = () => {
+    const host = document.getElementById('llg-study-panel-root');
+    const shadow = host && host.shadowRoot;
+    return { host, shadow, panel: shadow ? shadow.querySelector('[data-role="panel"]') : null };
+  };
+
+  if (!pick().panel) {
+    const btn = document.getElementById('llg-panel-btn');
+    if (btn) btn.click();
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (pick().panel && pick().panel.dataset.state !== 'open') {
+    const btn = document.getElementById('llg-panel-btn');
+    if (btn) btn.click();
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  const rect = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const round = (n) => Math.round(n);
+    return {
+      left: round(r.left), right: round(r.right),
+      top: round(r.top), bottom: round(r.bottom),
+      width: round(r.width), height: round(r.height),
+    };
+  };
+
+  const { panel } = pick();
+  const video = document.querySelector('#movie_player video');
+  const p = rect(panel);
+  const v = rect(video);
+  const overlap = Boolean(p && v)
+    && !(v.right <= p.left || v.left >= p.right || v.bottom <= p.top || v.top >= p.bottom);
+
+  const app = document.querySelector('ytd-app');
+  return {
+    panelState: panel ? panel.dataset.state : null,
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+    panel: p,
+    video: v,
+    overlap,
+    clearance: p && v ? Math.round(p.left - v.right) : null,
+    html: {
+      marker: document.documentElement.getAttribute('data-llg-panel'),
+      widthVar: getComputedStyle(document.documentElement).getPropertyValue('--llg-panel-w').trim(),
+    },
+    layout: {
+      theater: Boolean(document.querySelector('ytd-watch-flexy[theater]')),
+      fullscreen: Boolean(document.querySelector('ytd-watch-flexy[fullscreen]')),
+      app: rect(app),
+      appMarginRight: app ? getComputedStyle(app).marginRight : null,
+      columns: rect(document.querySelector('#columns')),
+      secondary: rect(document.querySelector('#secondary')),
+      fullBleed: rect(document.querySelector('#full-bleed-container')),
+      player: rect(document.querySelector('#movie_player')),
+      masthead: rect(document.querySelector('#masthead-container')),
+    },
+  };
+})()`;
+
+/**
+ * 让位规则的候选清单（见 layoutCompareProbe）。
+ *
+ * 这些都是「把页面内容收窄，给右侧面板腾地方」的写法，差别在于挂在哪一层、
+ * 用 padding 还是 margin —— 剧场模式下播放器在 `#full-bleed-container` 里贴满视口，
+ * 两种写法的结果可能完全不同，所以必须实测，不能推理。
+ */
+const LAYOUT_CANDIDATES = [
+  // 实测教训：只把容器改窄，`<video>` 的矩形**一动不动** —— 剧场模式下播放器的
+  // 尺寸是 YouTube 自己的 JS 算出来写进内联样式/由它自己的 ResizeObserver 驱动的，
+  // 光改 CSS 不会重算。所以每条候选都带上「补一次 resize 事件」这个动作，
+  // 并且单独留一条 baseline+nudge 用来看「是不是只要 nudge 就够了」。
+  {
+    // 上一轮实测：只让位给视频不够 —— 两列栅格在收窄后的容器里溢出，
+    // #columns 宽 1221 而可用只有 994，推荐列被面板压住 227px；
+    // `#primary{min-width:0}` / 折行 / `#secondary{width:100%}` 都治不好（要么没效果，
+    // 要么把视频反而拉宽）。所以这一轮直接试「把 #columns 自己夹住」这一族写法。
+    name: 'columns-max100',
+    css: '#columns { max-width: 100% !important; }',
+    nudge: true,
+  },
+  {
+    name: 'columns-max100+min0',
+    css: '#columns { max-width: 100% !important; }\n'
+      + '#primary { min-width: 0 !important; }',
+    nudge: true,
+  },
+  {
+    name: 'columns-max100+sec402',
+    css: '#columns { max-width: 100% !important; }\n'
+      + '#primary { min-width: 0 !important; }\n'
+      + '#secondary { width: 402px !important; flex: 0 0 402px !important; }',
+    nudge: true,
+  },
+  {
+    name: 'flexy-fit+columns-max100',
+    css: 'ytd-watch-flexy { min-width: 0 !important; max-width: 100% !important; }\n'
+      + '#columns { max-width: 100% !important; }\n'
+      + '#primary { min-width: 0 !important; }',
+    nudge: true,
+  },
+];
+
+/** 顶栏与迷你播放器是 fixed 的，任何让位规则都盖不住它们，得单独让 */
+const LAYOUT_MASTHEAD_CSS = `
+#masthead-container { width: calc(100% - var(--llg-panel-w)) !important; }
+ytd-miniplayer { right: var(--llg-panel-w) !important; }
+`;
+
+/**
+ * 候选规则对比探针：在同一种布局下依次套用每条候选规则，各量一次「面板 vs 视频」。
+ *
+ * 为什么要这样：单次测量的成败分不清「规则不对」和「量的时候布局还没稳定」，
+ * 而且每换一条规则都重跑一次探针（要开真浏览器）代价太高。一次跑完所有候选，
+ * 结果直接并排比较，才能选出真正生效的那条。
+ */
+function layoutCompareProbe(candidates = LAYOUT_CANDIDATES) {
+  return `(async () => {
+  const candidates = ${JSON.stringify(candidates)};
+  const mastheadCss = ${JSON.stringify(LAYOUT_MASTHEAD_CSS)};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const panelNow = () => {
+    const host = document.getElementById('llg-study-panel-root');
+    const shadow = host && host.shadowRoot;
+    return shadow ? shadow.querySelector('[data-role="panel"]') : null;
+  };
+
+  if (!panelNow() || panelNow().dataset.state !== 'open') {
+    const btn = document.getElementById('llg-panel-btn');
+    if (btn) btn.click();
+    await sleep(500);
+    if (panelNow() && panelNow().dataset.state !== 'open') { btn.click(); await sleep(500); }
+  }
+
+  const rect = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const round = (n) => Math.round(n);
+    return {
+      left: round(r.left), right: round(r.right),
+      top: round(r.top), bottom: round(r.bottom),
+      width: round(r.width), height: round(r.height),
+    };
+  };
+
+  /**
+   * 关键盒子的计算样式。
+   *
+   * 为什么要打这个：只看到「#columns 宽 1221 而可用只有 994」还不够 —— 得知道这
+   * 1221 是它自己的 width / min-width 来的，还是父级撑出来的，才能写对覆盖规则。
+   */
+  const boxes = () => {
+    const pick = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return {
+        // 注意：这里是**外层模板字符串里的代码**，不能用反引号（会提前结束字符串）
+        rect: Math.round(r.left) + '..' + Math.round(r.right),
+        width: cs.width,
+        minWidth: cs.minWidth,
+        maxWidth: cs.maxWidth,
+        flex: cs.flex,
+        paddingRight: cs.paddingRight,
+        overflowX: cs.overflowX,
+      };
+    };
+    return {
+      app: pick('ytd-app'),
+      flexy: pick('ytd-watch-flexy'),
+      columns: pick('#columns'),
+      primary: pick('#primary'),
+      secondary: pick('#secondary'),
+    };
+  };
+
+  const measure = () => {
+    const p = rect(panelNow());
+    const v = rect(document.querySelector('#movie_player video'));
+    const overlap = Boolean(p && v)
+      && !(v.right <= p.left || v.left >= p.right || v.bottom <= p.top || v.top >= p.bottom);
+    return {
+      overlap,
+      clearance: p && v ? Math.round(p.left - v.right) : null,
+      panel: p,
+      video: v,
+      player: rect(document.querySelector('#movie_player')),
+      fullBleed: rect(document.querySelector('#full-bleed-container')),
+      columns: rect(document.querySelector('#columns')),
+      // 推荐列：宽度由 YouTube 自己定（不跟着容器缩），所以「video 让开了」不等于
+      // 「整页都让开了」。量它才能回答「面板压住了谁」。
+      secondary: rect(document.querySelector('#secondary')),
+      app: rect(document.querySelector('ytd-app')),
+      masthead: rect(document.querySelector('#masthead-container')),
+      primary: rect(document.querySelector('#primary')),
+    };
+  };
+
+  const style = document.createElement('style');
+  style.id = 'llg-probe-layout';
+  document.head.appendChild(style);
+
+  const panelWidth = Math.round(panelNow() ? panelNow().getBoundingClientRect().width : 400);
+  document.documentElement.setAttribute('data-llg-panel', 'probe');
+  document.documentElement.style.setProperty('--llg-panel-w', panelWidth + 'px');
+
+  const out = {
+    panelWidth,
+    theater: Boolean(document.querySelector('ytd-watch-flexy[theater]')),
+    fullscreenAttr: Boolean(document.querySelector('ytd-watch-flexy[fullscreen]')),
+    documentFullscreen: Boolean(document.fullscreenElement),
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+    baseline: measure(),
+    boxes: boxes(),
+    candidates: [],
+  };
+
+  const nudgeResize = () => {
+    window.dispatchEvent(new Event('resize'));
+    const video = document.querySelector('#movie_player video');
+    if (video) video.dispatchEvent(new Event('resize', { bubbles: false }));
+  };
+
+  for (const candidate of candidates) {
+    style.textContent = mastheadCss + '\\n' + candidate.css;
+    await sleep(600);
+    if (candidate.nudge) {
+      nudgeResize();
+      await sleep(600);
+      nudgeResize();
+    }
+    await sleep(900);
+    out.candidates.push({ name: candidate.name, ...measure() });
+  }
+
+  style.textContent = '';
+  await sleep(300);
+  style.remove();
+  document.documentElement.removeAttribute('data-llg-panel');
+  document.documentElement.style.removeProperty('--llg-panel-w');
+
+  return out;
+})()`;
+}
+
+/** 当前是不是剧场模式 */
+const THEATER_PROBE = '(() => Boolean(document.querySelector("ytd-watch-flexy[theater]")))()';
+
 /** 系统级画中画窗口 */
 const PIP_PROBE = `(() => {
   const apiPresent = 'documentPictureInPicture' in window;
@@ -405,6 +758,54 @@ async function clickSelector(cdp, sessionId, selector, hostId = null) {
   return true;
 }
 
+/**
+ * 把鼠标移到播放器上，让 YouTube 的控制栏显形。
+ *
+ * 实测：控制栏自动隐藏时，`clickSelector` 那套真实坐标点击会落在视频上 ——
+ * 表现为「点了剧场按钮但 theater 属性没变」。所以点控制栏之前必须先 hover。
+ */
+async function hoverPlayer(cdp, sessionId) {
+  const box = await evaluate(cdp, sessionId, `(() => {
+    const el = document.querySelector('#movie_player');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`);
+  if (!box || typeof box.x !== 'number') return false;
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y }, sessionId);
+  await sleep(900);
+  return true;
+}
+
+/**
+ * 切剧场模式。
+ *
+ * 实测：控制栏自动隐藏时，真实坐标点击会落在视频上（点了个寂寞）；而剧场开关
+ * 不需要用户激活，所以用程序化 click 更可靠 —— 与全屏不同，全屏必须有瞬时激活。
+ */
+async function toggleTheater(cdp, sessionId) {
+  const before = await evaluate(cdp, sessionId, THEATER_PROBE);
+  const clicked = await evaluate(cdp, sessionId, `(() => {
+    const btn = document.querySelector('.ytp-size-button');
+    if (!btn) return false;
+    btn.click();
+    return true;
+  })()`);
+  await sleep(2500);
+  const after = await evaluate(cdp, sessionId, THEATER_PROBE);
+  console.log(`[probe] 剧场切换: 点击=${clicked}  ${before} → ${after}`);
+  return after;
+}
+
+/** 反复切到想要的剧场状态（最多试 3 次），返回最终状态 */
+async function ensureTheater(cdp, sessionId, want) {
+  let state = await evaluate(cdp, sessionId, THEATER_PROBE);
+  for (let i = 0; i < 3 && state !== want; i += 1) {
+    state = await toggleTheater(cdp, sessionId);
+  }
+  return state;
+}
+
 /** 拖拽 shadow DOM 里的手柄（测面板改宽）。dx 为负表示往左拖，面板变宽 */
 async function dragShadowHandle(cdp, sessionId, hostId, selector, dx) {
   const box = await evaluate(cdp, sessionId, `(() => {
@@ -457,7 +858,17 @@ function pickPage(targetInfos, wantUrl) {
     const youtube = pages.find((t) => String(t.url).includes('youtube.com/watch'));
     if (youtube) return youtube;
   }
+  // 只有 YouTube 页能碰：其它页（实测撞到过 localhost 开发页、linglass.app 落地页）
+  // attach 之后 Runtime.enable 会直接超时 —— 那不是「页面在忙」，而是这类 target
+  // 在 Arc 里没被真正托管给调试器。宁可让调用方另开一个 YouTube 标签。
+  const anyYoutube = pages.find((t) => String(t.url).includes('youtube.com'));
+  if (anyYoutube) return anyYoutube;
   return pages.find((t) => String(t.url).startsWith('http')) || pages[0] || null;
+}
+
+/** 挑出来的这个 target 能不能用（是不是 YouTube 页） */
+function isUsablePage(target) {
+  return Boolean(target) && String(target.url || '').includes('youtube.com');
 }
 
 async function main() {
@@ -521,12 +932,31 @@ async function main() {
       await sleep(6000);
 
       const again = await cdp.send('Target.getTargets');
-      pageTarget = again.targetInfos.find((t) => t.type === 'page' && !String(t.url).startsWith('chrome-extension://'));
+      pageTarget = pickPage(again.targetInfos, flag('url'));
       if (!pageTarget) {
         console.log('[probe] Arc 仍然没开出标签页，当前 target：');
         for (const t of again.targetInfos) console.log(`  ${t.type} | ${String(t.url).slice(0, 110)}`);
         return;
       }
+    }
+
+    // Arc 用的是你本人的 profile，列表里全是你日常的标签页 —— 而它们不能碰（见 pickPage）。
+    // 挑中的不是 YouTube 就让 Arc 自己再开一个：命令行的 URL 参数与 Target.createTarget
+    // 在 Arc 上都不行，只有 AppleScript 这条路稳。
+    if (pageTarget && !isUsablePage(pageTarget)) {
+      const kickUrl = flag('url') || 'https://www.youtube.com/';
+      console.log(`[probe] 挑中的标签页不是 YouTube（${String(pageTarget.url).slice(0, 60)}），让 Arc 另开 ${kickUrl}`);
+      try {
+        execFileSync('osascript', ['-e', `tell application "Arc" to open location "${kickUrl}"`], { stdio: 'ignore' });
+      } catch (err) {
+        console.log(`[probe] AppleScript 失败：${err && err.message}`);
+      }
+      await sleep(6000);
+
+      const again = await cdp.send('Target.getTargets');
+      const usable = pickPage(again.targetInfos, flag('url'));
+      if (isUsablePage(usable)) pageTarget = usable;
+      else console.log('[probe] Arc 没开出 YouTube 页，沿用原来那个 target（多半会在 attach 处超时）');
     }
 
     console.log(`[probe] 目标页  ${String(pageTarget.url || '').slice(0, 100)}`);
@@ -672,6 +1102,36 @@ async function main() {
       console.log('[probe] 所有上下文：');
       console.log(JSON.stringify(contexts.map((c) => ({ id: c.id, origin: c.origin, name: c.name, aux: c.auxData })), null, 1));
     }
+
+    rule('布局：打开面板后，它和视频是否重叠');
+    const layoutBase = await evaluate(cdp, sessionId, LAYOUT_PROBE);
+    console.log(`[probe] panelState=${layoutBase.panelState}`
+      + ` panel=[${layoutBase.panel ? `${layoutBase.panel.left}..${layoutBase.panel.right}` : '-'}]`
+      + ` video=[${layoutBase.video ? `${layoutBase.video.left}..${layoutBase.video.right}` : '-'}]`
+      + ` overlap=${layoutBase.overlap} clearance=${layoutBase.clearance}`);
+    console.log(`[probe] 我们的标记: data-llg-panel=${layoutBase.html.marker}`
+      + ` --llg-panel-w="${layoutBase.html.widthVar}"`
+      + ` theater=${layoutBase.layout.theater} fullscreen=${layoutBase.layout.fullscreen}`);
+    printPanelVsPage('布局：面板压住了谁（现状）', layoutBase);
+
+    // 让位规则必须在「默认 / 剧场 / 全屏」三种布局下都对，所以三态各比一次候选规则。
+    // 切模式用真实的输入事件点 YouTube 自己的按钮，而不是手动改属性 —— 属性一改 CSS 会响应，
+    // 但 YouTube 自己的重排逻辑不一定跟着跑，量出来的就不是真实排版。
+    rule('布局：候选让位规则对比（默认视图）');
+    await ensureTheater(cdp, sessionId, false);
+    printLayoutCompare('默认视图', await evaluate(cdp, sessionId, layoutCompareProbe()));
+
+    rule('布局：候选让位规则对比（剧场视图）');
+    await ensureTheater(cdp, sessionId, true);
+    printLayoutCompare('剧场视图', await evaluate(cdp, sessionId, layoutCompareProbe()));
+
+    rule('布局：候选让位规则对比（全屏）');
+    await hoverPlayer(cdp, sessionId);
+    await clickSelector(cdp, sessionId, '.ytp-fullscreen-button');
+    await sleep(3000);
+    printLayoutCompare('全屏', await evaluate(cdp, sessionId, layoutCompareProbe()));
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, sessionId);
+    await sleep(1500);
 
     // ---------------------------------------------------------- 交互实测
     if (!flag('no-checks')) {

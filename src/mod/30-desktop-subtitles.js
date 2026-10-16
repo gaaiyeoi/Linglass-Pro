@@ -12,6 +12,7 @@
  *   文案 —— 直接读 Linglass 的 Shadow DOM（实时、永远最新）
  *   进度 —— 10-subtitle-track.js 记录的句子时间轴，句内线性插值
  *   原文行的文节分隔符 —— 复用 15-ja-break.js 的开关与 05-ja-segment.js 的切分结果
+ *   外观 —— 照搬官方「外观」设置（样式 / 字号 / 颜色 / 双语），见下面的「原生外观」一节
  *
  * ── 常驻语义（本文件最容易被改坏的部分，先读这段）──
  *
@@ -58,7 +59,21 @@
   const HEARTBEAT_MS = 1000;
 
   const PIP_WIDTH = 1000;
-  const PIP_HEIGHT = 220;
+  /** 比只放两行字幕时高一些：底部留出播放控制栏（见 PIP_BASE_CSS 的 #bar） */
+  const PIP_HEIGHT = 264;
+
+  /**
+   * 倍速循环按钮的档位（见 command('rate')）。
+   * 用固定档位而不是滑块：浮窗是系统窗口，拖滑块的手感与命中面积都不好，
+   * 而且档位是学习场景里真正会用的那几个。
+   */
+  const RATES = [0.75, 1, 1.25, 1.5, 1.75, 2];
+  /** 快退/快进的步长（秒） */
+  const SEEK_STEP = 5;
+  /** 上一句：播到句中超过这么久时，先把本句拉回开头，再按一次才是上一句 */
+  const RESTART_CUE_AFTER = 1;
+  /** 只在播放/暂停/倍速变化时重画控制栏，这几个事件类型就够了 */
+  const VIDEO_STATE_EVENTS = ['play', 'pause', 'ratechange'];
 
   /** 常驻开关的落盘键。默认 true —— 用户没表过态时就是要开着 */
   const STORE_KEY = 'llgPip';
@@ -76,33 +91,398 @@
 
   /** 与 15-ja-break.js 的 ::after 观感对齐（那边是 margin: 0 .14em） */
   const THIN_SPACE = '\u2009';
+  /** 浮窗里分隔符节点的 class（样式见 pipCss：与视频内那套同一份观感） */
+  const SEP_CLASS = 'llg-sep';
 
-  const PIP_CSS = `
+  // ---------------------------------------------------------------- 原生外观
+  //
+  // 浮窗的排版照搬官方字幕：字体栈、字重、字号、颜色、底板、阴影/描边全部来自官方
+  // 「外观」设置页（样式 / 字号 / 颜色 / 双语）—— 用户在那边改，浮窗跟着变。
+  //
+  // 读法与官方一致：chrome.storage.sync['linglass-settings']。官方用 zustand persist
+  // 落盘，值是对象还是 JSON 字符串两种形态都出现过，所以两种都兜。
+  //
+  // 与官方唯一的偏差：**字号不乘播放器高度**。官方是
+  //   base = max(11, max(playerHeight * .0333, 24) * scale/100)
+  // 会跟着播放器尺寸变（剧场 / 全屏就放大）。浮窗没有「播放器尺寸」这个概念，
+  // 而用户要的是「设置是多少就是多少」，所以这里只取官方的基座 24px 乘档位：
+  // 浮窗拉大拉小、播放器进全屏，字号都不动。
+  //
+  // 取值出处（vendor/linglass-1.12.3/assets/，官方一发版文件哈希就变，只记名字前缀）：
+  //   settings-*.js    默认设置 pe、预设表 f、字号 Se()、阴影/描边 re() 与 R()、色板
+  //   promoCards-*.js  落盘读取、译文行的 adjustColorOpacity()、底板用色 primaryBgColor
+  //                    （默认 #000000，官方外观页里能换的是**文字**颜色）
+
+  /** 官方外观设置的落盘键（chrome.storage.sync） */
+  const SETTINGS_KEY = 'linglass-settings';
+
+  /** 官方 f.classic.font 等字体栈 */
+  const FONT_SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+  const FONT_COMIC_LATIN = '"Trebuchet MS", "Segoe UI", Verdana, system-ui, sans-serif';
+  const FONT_COMIC_JA = '"Hiragino Maru Gothic ProN", "Hiragino Maru Gothic", "Yu Gothic",'
+    + ' YuGothic, Meiryo, sans-serif';
+
+  /** 官方 C：comic 预设把这几种语言的字面换成手写体 */
+  const COMIC_LANGS = [
+    'en', 'de', 'fr', 'es', 'it', 'pt-BR', 'pt-PT', 'nl', 'sv', 'pl', 'cs', 'tr', 'id', 'ru', 'uk',
+  ];
+  /** 官方 fe：这三种语言的原文行放大一档、加粗一档 */
+  const CJK_LANGS = ['zh', 'ja', 'ko'];
+
+  /** 官方 U / y：100% 档位的基座字号与字号下限 */
+  const BASE_FONT_PX = 24;
+  const MIN_FONT_PX = 11;
+  /** 官方 D.FONT_SIZE_RATIO / x.SECONDARY_RATIO */
+  const CJK_FONT_RATIO = 27 / 24;
+  const SECONDARY_RATIO = 20 / 24;
+  /** 官方 x：整块底板（classic）的内边距与圆角，按 metricScale 缩放 */
+  const PLATE_PAD_Y = 8;
+  const PLATE_PAD_X = 16;
+  const PLATE_RADIUS = 8;
+  /** 官方 le()：逐行底板（contrast）的尺寸系数 */
+  const LINE_PAD_Y = .14;
+  const LINE_PAD_X = .42;
+  const LINE_RADIUS = .16;
+  const LINE_GAP = .14;
+  /** 官方 primaryBgColor 的默认值：底板是黑的，用户能换的是文字颜色 */
+  const PLATE_COLOR = '#000000';
+  /** 官方描边环的方向数（浏览器不支持 paint-order 时才铺） */
+  const OUTLINE_STEPS = 8;
+
+  /** 官方默认设置（settings-*.js 的 pe 里浮窗用得上的那几项） */
+  const DEFAULT_APPEARANCE = {
+    style: 'classic',
+    scale: 100,
+    color: '#FFFFFF',
+    dual: true,
+    primaryLang: null,
+    secondaryLang: null,
+  };
+
+  /**
+   * 官方四套预设（settings-*.js 的 f），字段名照抄，便于以后与官方对照：
+   *   plate  block = 整块一个矩形（classic）、line = 每行各自一个（contrast）、none = 不画
+   *   shadow 阴影类型，取值与官方 R() 的 switch 一致
+   */
+  const STYLE_SPECS = {
+    classic: {
+      font: FONT_SANS,
+      primaryWeight: 500,
+      secondaryWeight: 400,
+      plate: 'block',
+      plateOpacity: .8,
+      plateBlur: true,
+      outlineEm: 0,
+      shadow: 'plate',
+      secondaryAlpha: .75,
+      letterSpacingEm: 0,
+    },
+    cinema: {
+      font: FONT_SANS,
+      primaryWeight: 600,
+      secondaryWeight: 500,
+      plate: 'none',
+      plateOpacity: 0,
+      plateBlur: false,
+      outlineEm: .055,
+      shadow: 'depth',
+      secondaryAlpha: 1,
+      letterSpacingEm: .004,
+    },
+    comic: {
+      font: FONT_SANS,
+      displayFont: { stack: FONT_COMIC_LATIN, langs: COMIC_LANGS },
+      langOverrides: { ja: FONT_COMIC_JA },
+      primaryWeight: 700,
+      secondaryWeight: 600,
+      plate: 'none',
+      plateOpacity: 0,
+      plateBlur: false,
+      outlineEm: .085,
+      shadow: 'offset',
+      secondaryAlpha: 1,
+      letterSpacingEm: .008,
+    },
+    contrast: {
+      font: FONT_SANS,
+      primaryWeight: 600,
+      secondaryWeight: 500,
+      plate: 'line',
+      plateOpacity: .88,
+      plateBlur: false,
+      outlineEm: 0,
+      shadow: 'none',
+      secondaryAlpha: 1,
+      letterSpacingEm: 0,
+    },
+  };
+
+  function round1(value) {
+    return Math.round(value * 10) / 10;
+  }
+
+  /**
+   * #RRGGBB → [r, g, b]。
+   * 官方对残缺值直接当黑处理（hexToRGBA 里长度不等于 6 就走 '000000'），这里同样兜住。
+   */
+  function hexChannels(hex) {
+    const raw = String(hex == null ? '' : hex).replace('#', '');
+    const value = /^[0-9a-fA-F]{6}$/.test(raw) ? raw : '000000';
+    return [
+      parseInt(value.slice(0, 2), 16),
+      parseInt(value.slice(2, 4), 16),
+      parseInt(value.slice(4, 6), 16),
+    ];
+  }
+
+  /** 官方 hexToRGBA()：第二个参数是百分比 */
+  function hexToRgba(hex, alphaPercent) {
+    const [r, g, b] = hexChannels(hex);
+    return `rgba(${r}, ${g}, ${b}, ${alphaPercent / 100})`;
+  }
+
+  /** 官方 adjustColorOpacity()：同一个颜色换个不透明度（译文行用它） */
+  function colorWithAlpha(hex, alpha) {
+    const [r, g, b] = hexChannels(hex);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  function styleSpecOf(style) {
+    return STYLE_SPECS[style] || STYLE_SPECS.classic;
+  }
+
+  /** 官方 oe()：预设默认字体 → 这门语言有专门字面（comic 的日语）就换掉 */
+  function fontStackOf(spec, lang) {
+    if (lang && spec.langOverrides && spec.langOverrides[lang]) return spec.langOverrides[lang];
+    if (lang && spec.displayFont && spec.displayFont.langs.includes(lang)) {
+      return spec.displayFont.stack;
+    }
+    return spec.font;
+  }
+
+  function isCJK(lang) {
+    return CJK_LANGS.includes(lang);
+  }
+
+  /**
+   * 官方 Se()：基座字号 → 原文行 / 译文行。
+   * 只有一处不同：官方拿播放器高度算 base，我们固定用 24px 基座（见本节顶部说明）。
+   */
+  function fontSizeOf(target) {
+    const base = Math.max(MIN_FONT_PX, BASE_FONT_PX * (target.scale / 100));
+    return {
+      base,
+      primary: isCJK(target.primaryLang) ? base * CJK_FONT_RATIO : base,
+      secondary: Math.max(MIN_FONT_PX, base * SECONDARY_RATIO),
+    };
+  }
+
+  /** 官方 ie()：原文语言是 CJK 时加粗一档 */
+  function primaryWeightOf(spec, target) {
+    return isCJK(target.primaryLang)
+      ? Math.min(700, spec.primaryWeight + 100)
+      : spec.primaryWeight;
+  }
+
+  /** 官方 R()：三种阴影类型，系数照抄 */
+  function shadowOf(shape, px) {
+    switch (shape) {
+      case 'plate':
+        return `0 ${px(.083)}px ${px(.333)}px rgba(0, 0, 0, 0.8)`;
+      case 'depth':
+        return `0 ${px(.04)}px ${px(.13)}px rgba(0, 0, 0, 0.6)`;
+      case 'offset':
+        return `${px(.05)}px ${px(.05)}px 0 rgba(0, 0, 0, 0.62)`;
+      default:
+        return 'none';
+    }
+  }
+
+  /**
+   * 官方 re()：阴影 + 描边。
+   * 支持 paint-order 就直接描边（更干净），不支持才铺一圈 8 向 text-shadow。
+   */
+  function textEdgeOf(spec, basePx, paintOrderSupported) {
+    const px = (ratio) => round1(basePx * ratio);
+    const shadow = shadowOf(spec.shadow, px);
+
+    if (!(spec.outlineEm > 0)) return { shadow, stroke: '0', paintOrder: 'normal' };
+
+    const ring = Math.max(1, round1(basePx * spec.outlineEm));
+    if (paintOrderSupported) return { shadow, stroke: `${ring}px`, paintOrder: 'stroke fill' };
+
+    const offsets = [];
+    for (let i = 0; i < OUTLINE_STEPS; i += 1) {
+      const angle = (Math.PI * 2 * i) / OUTLINE_STEPS;
+      const x = (Math.cos(angle) * ring).toFixed(2);
+      const y = (Math.sin(angle) * ring).toFixed(2);
+      offsets.push(`${x}px ${y}px 0 rgba(0, 0, 0, 0.92)`);
+    }
+    const joined = offsets.join(', ');
+    return {
+      shadow: shadow === 'none' ? joined : `${joined}, ${shadow}`,
+      stroke: '0',
+      paintOrder: 'normal',
+    };
+  }
+
+  function canPaintOrder() {
+    return typeof CSS !== 'undefined' && typeof CSS.supports === 'function'
+      && CSS.supports('paint-order', 'stroke fill');
+  }
+
+  /** 底板规则：block 画在整块上，line 画在每行上，none 什么都不画 */
+  function plateCss(spec, basePx) {
+    if (spec.plate === 'block') {
+      const scale = basePx / BASE_FONT_PX;
+      const blur = spec.plateBlur
+        ? ' backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);'
+        : '';
+      return `#plate {
+  padding: ${round1(PLATE_PAD_Y * scale)}px ${round1(PLATE_PAD_X * scale)}px;
+  border-radius: ${round1(PLATE_RADIUS * scale)}px;
+  background: linear-gradient(to bottom,
+    ${hexToRgba(PLATE_COLOR, spec.plateOpacity * 75)},
+    ${hexToRgba(PLATE_COLOR, spec.plateOpacity * 100)});${blur}
+}`;
+    }
+
+    if (spec.plate === 'line') {
+      return `.kline {
+  padding: ${round1(LINE_PAD_Y * basePx)}px ${round1(LINE_PAD_X * basePx)}px;
+  background: ${hexToRgba(PLATE_COLOR, spec.plateOpacity * 100)};
+  border-radius: ${round1(LINE_RADIUS * basePx)}px;
+}
+.kline + .kline { margin-top: ${round1(LINE_GAP * basePx)}px; }`;
+    }
+
+    return '';
+  }
+
+  /** 与外观无关的部分：结构、进度条、控制栏。字号一律写死 px，不跟浮窗尺寸走 */
+  const PIP_BASE_CSS = `
 :root { color-scheme: dark; }
 html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased; }
-#box { height: 100%; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; box-sizing: border-box;
-  padding: 0 34px; gap: 8px; }
+#box { height: 100%; display: flex; flex-direction: column; box-sizing: border-box; }
+#stage { flex: 1; min-height: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; padding: 10px 34px 0; gap: 8px; }
 .kline { position: relative; display: inline-block; max-width: 100%; }
 .kfill { position: absolute; left: 0; top: 0; bottom: 0; width: 0;
   border-radius: var(--radius-sm, 8px); }
-#fill-primary { background: rgba(10, 132, 255, .30); }
-#line-primary { position: relative; display: block;
-  font-size: clamp(20px, 3.2vw, 44px); font-weight: 600; color: #fff;
-  line-height: 1.28; text-align: center; white-space: pre-wrap;
-  text-shadow: 0 2px 10px rgba(0,0,0,.85), 0 0 3px rgba(0,0,0,.9); }
-#fill-secondary { background: rgba(10, 132, 255, .22); }
-#line-secondary { position: relative; display: block;
-  font-size: clamp(14px, 2.1vw, 29px); font-weight: 400; color: #c8c8d0;
-  line-height: 1.36; text-align: center; white-space: pre-wrap;
-  text-shadow: 0 2px 10px rgba(0,0,0,.85), 0 0 3px rgba(0,0,0,.9); }
-#box:not(:has(#line-primary:not(:empty)))::before {
+/* 填充是「读字时的背景」，不是装饰：官方 classic 底板本来就是 rgba(0,0,0,.8) 的深底，
+   再压 30% 的蓝就成了「蓝块上的白字」。所以取一个只在扫读时够用、不跟文字抢对比的透明度。 */
+#fill-primary { background: rgba(10, 132, 255, .16); }
+#fill-secondary { background: rgba(10, 132, 255, .11); }
+#line-primary, #line-secondary { position: relative; display: block;
+  line-height: 1.3; text-align: center; white-space: pre-wrap; }
+#stage:not(:has(#line-primary:not(:empty)))::before {
   content: "— 等待 Linglass 字幕 —";
-  font-size: clamp(12px, 1.2vw, 15px); font-weight: 400;
-  color: #7a7a80; letter-spacing: .04em; }
+  font-size: 15px; font-weight: 400; color: #7a7a80; letter-spacing: .04em; }
+
+/* 播放控制栏：浮窗自己的按钮，直接操作宿主页面里的 video（同源）。
+   字体栈是给控制栏用的 —— 字幕行不再继承它（那两行完全按官方外观走） */
+#bar { display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 12px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+#bar button { min-width: 42px; height: 30px; padding: 0 10px;
+  border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
+  background: rgba(255,255,255,.08); color: #fff;
+  font: inherit; font-size: 13px; line-height: 1; cursor: pointer;
+  transition: background .15s ease; }
+#bar button:hover { background: rgba(255,255,255,.18); }
+#bar button:active { background: rgba(255,255,255,.26); }
+#bar button[disabled] { opacity: .32; cursor: default; }
+#bar button[disabled]:hover { background: rgba(255,255,255,.08); }
+#pip-toggle { min-width: 54px; font-size: 15px; }
+#pip-rate { font-variant-numeric: tabular-nums; }
 `;
+
+  /**
+   * 浮窗样式表 = 骨架（上面那段）+ 按官方规则生成的外观。
+   * 一次生成整张写进 <style>；设置变了就整张重写，不会出现新旧两套规则打架。
+   */
+  function pipCss(target) {
+    const spec = styleSpecOf(target.style);
+    const size = fontSizeOf(target);
+    const edge = textEdgeOf(spec, size.base, canPaintOrder());
+    const letterSpacing = spec.letterSpacingEm ? `${spec.letterSpacingEm}em` : 'normal';
+    const secondaryColor = spec.secondaryAlpha < 1
+      ? colorWithAlpha(target.color, spec.secondaryAlpha)
+      : target.color;
+
+    return [PIP_BASE_CSS, plateCss(spec, size.base), `
+#plate { display: flex; flex-direction: column; align-items: center;
+  box-sizing: border-box; max-width: 100%; }
+#line-primary { font-family: ${fontStackOf(spec, target.primaryLang)};
+  font-size: ${round1(size.primary)}px; font-weight: ${primaryWeightOf(spec, target)};
+  letter-spacing: ${letterSpacing}; color: ${target.color};
+  text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
+  -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
+#line-secondary { font-family: ${fontStackOf(spec, target.secondaryLang)};
+  font-size: ${round1(size.secondary)}px; font-weight: ${spec.secondaryWeight};
+  letter-spacing: ${letterSpacing}; color: ${secondaryColor};
+  text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
+  -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
+/* 分隔符：与 15-ja-break.js 视频内那套（那边是 ::after）同一份观感 */
+.${SEP_CLASS} { margin: 0 .14em; opacity: .42; font-weight: 400; }
+`].join('\n');
+  }
+
+  /**
+   * 官方设置的落盘值 → 浮窗用得上的那几项。
+   *
+   * 三种形态都要兜：zustand persist 的对象 `{state, version}`、被 JSON.stringify 过的
+   * 字符串、以及更早版本直接铺平的设置对象。缺键/读不成 → 退回官方默认。
+   */
+  function parseSettings(raw) {
+    let value = raw;
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        value = null;
+      }
+    }
+    const state = value && typeof value === 'object' && value.state ? value.state : value;
+    if (!state || typeof state !== 'object') return { ...DEFAULT_APPEARANCE };
+
+    return {
+      style: typeof state.subtitleStyle === 'string'
+        ? state.subtitleStyle
+        : DEFAULT_APPEARANCE.style,
+      scale: Number.isFinite(state.subtitleScale) && state.subtitleScale > 0
+        ? state.subtitleScale
+        : DEFAULT_APPEARANCE.scale,
+      color: typeof state.subtitleColor === 'string'
+        ? state.subtitleColor
+        : DEFAULT_APPEARANCE.color,
+      dual: state.dualSubtitles !== false,
+      primaryLang: state.learningLanguage == null ? null : state.learningLanguage,
+      secondaryLang: state.nativeLanguage == null ? null : state.nativeLanguage,
+    };
+  }
+
+  /** 换一份外观：窗口开着就整张重写样式表，并强制重画一次文本（双语开关可能变了） */
+  function applyAppearance(next) {
+    appearance = next;
+    if (!pipWin || !styleEl) return;
+    styleEl.textContent = pipCss(appearance);
+    lastKey = '';
+    pushText();
+  }
+
+  /** 读一次官方外观设置。storage 不可用（被裁剪的包）时保持默认值即可 */
+  function loadAppearance() {
+    try {
+      return chrome.storage.sync
+        .get(SETTINGS_KEY)
+        .then((res) => applyAppearance(parseSettings(res && res[SETTINGS_KEY])))
+        .catch(() => {});
+    } catch {
+      return Promise.resolve();
+    }
+  }
 
   const ICON_SVG = `
 <svg viewBox="0 0 24 24" class="llg-mod-icon" aria-hidden="true">
@@ -116,6 +496,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let pipWin = null;
   let rafId = 0;
   let lastKey = '';
+  /** PiP 里那张 <style>（窗口重建时换引用，关窗时清掉） */
+  let styleEl = null;
+  /** 当前生效的外观（官方设置的投影，见「原生外观」一节） */
+  let appearance = { ...DEFAULT_APPEARANCE };
   /** 常驻开关（落盘）。true = 希望它开着 */
   let enabled = true;
   /** 待开的一次性手势监听器（armed 非空即已挂上） */
@@ -134,6 +518,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let lastVisibleAt = 0;
   /** 页面当前是不是处于后台（用来识别 hidden → visible 的跃迁） */
   let pageHidden = document.visibilityState === 'hidden';
+  /** 已经挂上 play/pause/ratechange 的那个 video（换视频时要换手） */
+  let boundVideo = null;
 
   function supported() {
     return 'documentPictureInPicture' in window;
@@ -152,51 +538,88 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   }
 
   /**
-   * 原文行按日语「文节」插入分隔符。
+   * 原文行按日语「文节」切开，分隔符单独成段。
    *
-   * 这里改的是**浮窗自己的纯文本**，与 15-ja-break.js「不许碰官方字幕行文本流」那条约束
+   * 这里改的是**浮窗自己的节点**，与 15-ja-break.js「不许碰官方字幕行文本流」那条约束
    * 无关 —— 那条约束保护的是官方点词/拖拽选词的字符偏移，浮窗里没有这回事。
    *
-   * 尊重视频内断句的开关：关着、或 15-ja-break.js 没加载（扩展被裁剪过）时原样返回。
+   * 返回片段而不是拼好的字符串，是因为分隔符要单独压样式（原生那套挂在 ::after 上：
+   * 半透明 + 字重 400 + 固定间距），纯文本做不到这件事。
+   *
+   * 尊重视频内断句的开关：关着、或 15-ja-break.js 没加载（扩展被裁剪过）时只有一段。
    */
-  function displayPrimary(text) {
+  function primaryParts(text) {
+    const plain = [{ text: text || '', sep: false }];
     const jaBreak = globalThis.__llgModJaBreak;
     const segment = globalThis.__llgModJaSegment;
     if (!text || !jaBreak || typeof jaBreak.isEnabled !== 'function' || !jaBreak.isEnabled()) {
-      return text;
+      return plain;
     }
-    if (!segment || typeof segment.cut !== 'function') return text;
+    if (!segment || typeof segment.cut !== 'function') return plain;
 
     const points = segment.cut(text);
-    if (!points || !points.length) return text;
+    if (!points || !points.length) return plain;
 
     // cut() 的切点严格升序、且最后一点落在文本末尾，所以这样切不会丢尾巴
-    const separator = `${THIN_SPACE}${jaBreak.SEPARATOR || '|'}${THIN_SPACE}`;
-    const parts = [];
+    const words = [];
     let prev = 0;
     for (const point of points) {
-      if (point > prev) parts.push(text.slice(prev, point));
+      if (point > prev) words.push(text.slice(prev, point));
       prev = point;
     }
-    if (prev < text.length) parts.push(text.slice(prev));
-    return parts.join(separator);
+    if (prev < text.length) words.push(text.slice(prev));
+    if (!words.length) return plain;
+
+    // 间距交给 .llg-sep 的 margin（与原生一致），这里不往文本里塞空格
+    const parts = [];
+    for (const word of words) {
+      if (parts.length) parts.push({ text: (jaBreak.SEPARATOR || '|'), sep: true });
+      parts.push({ text: word, sep: false });
+    }
+    return parts;
+  }
+
+  /**
+   * 拼接后的可读文本（测试与探针用）。
+   * 渲染不走它 —— 渲染用 primaryParts()，间距由 CSS 给。这里补上窄空格，
+   * 读出来才是「昨日 | 買った」而不是「昨日|買った」。
+   */
+  function displayPrimary(text) {
+    return primaryParts(text)
+      .map((part) => (part.sep ? `${THIN_SPACE}${part.text}${THIN_SPACE}` : part.text))
+      .join('');
+  }
+
+  /** 片段 → 子节点。空片段不渲染，否则 #line-primary 不再是 :empty，占位文案就出不来了 */
+  function renderSegments(line, parts) {
+    if (!line) return;
+    const d = pipWin.document;
+    const nodes = [];
+    for (const part of parts) {
+      if (!part.text) continue;
+      const span = d.createElement('span');
+      if (part.sep) span.className = SEP_CLASS;
+      span.textContent = part.text;
+      nodes.push(span);
+    }
+    line.replaceChildren(...nodes);
   }
 
   function pushText() {
     if (!pipWin) return;
 
     const lines = currentLines();
-    const primary = displayPrimary(lines.primary);
-    // 分隔符开关的状态进键：用户中途切换断句时浮窗要重绘
-    const key = `${primary}\u0000${lines.secondary}`;
+    const parts = primaryParts(lines.primary);
+    // 双语关掉时官方也不显示译文行 —— 浮窗跟着它，别自作主张多给一行
+    const secondary = appearance.dual ? lines.secondary : '';
+    // 分隔符开关 + 双语开关的状态进键：用户中途改设置/改断句时浮窗要重绘
+    const key = `${parts.map((part) => part.text).join('\u0001')}\u0000${secondary}`;
     if (key === lastKey) return;
     lastKey = key;
 
     const d = pipWin.document;
-    const p = d.getElementById('line-primary');
-    const s = d.getElementById('line-secondary');
-    if (p) p.textContent = primary;
-    if (s) s.textContent = lines.secondary;
+    renderSegments(d.getElementById('line-primary'), parts);
+    setText(d.getElementById('line-secondary'), secondary);
   }
 
   function pushProgress() {
@@ -212,6 +635,133 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   function push() {
     pushText();
     pushProgress();
+  }
+
+  // ---------------------------------------------------------------- 播放控制栏
+  //
+  // 浮窗里的按钮直接操作宿主页面的 video（同一个内容脚本上下文，同源，不需要跨进程）。
+  // 控制逻辑集中在一个 command(act) 里：DOM 只负责把 data-act 递进来，
+  // 于是 Node 侧冒烟测试可以绕开 DOM 直接驱动它（见 __llgModPip.command）。
+
+  /** 宿主页面里的 video（与 10-subtitle-track.js 用同一套选择器） */
+  function video() {
+    return document.querySelector('#movie_player video') || document.querySelector('video');
+  }
+
+  function nextRate(current) {
+    const index = RATES.indexOf(current);
+    return index === -1 ? 1 : RATES[(index + 1) % RATES.length];
+  }
+
+  /**
+   * 上一句 / 下一句。
+   *
+   * 「上一句」有两段语义：已经播到句中（超过 RESTART_CUE_AFTER 秒）时，先把**本句**拉回
+   * 开头；否则才退到上一句。这样连点两次 = 回到上一句，符合听写场景的直觉。
+   */
+  function seekCue(delta) {
+    const el = video();
+    const cues = track.getCues();
+    if (!el || !cues.length) return;
+
+    const current = track.getCurrent();
+    let index = current ? current.index : -1;
+
+    if (delta < 0 && index >= 0 && el.currentTime - cues[index].start > RESTART_CUE_AFTER) {
+      el.currentTime = cues[index].start;
+      return;
+    }
+
+    index += delta;
+    if (index < 0 || index >= cues.length) return;
+    el.currentTime = cues[index].start;
+  }
+
+  /**
+   * 执行一个浮窗控制动作。返回 false 表示没有 video / 未知动作（调用方据此不做状态回显）。
+   * @param {string} act toggle | back | fwd | prev | next | rate
+   */
+  function command(act) {
+    const el = video();
+    if (!el) return false;
+
+    switch (act) {
+      case 'toggle':
+        if (el.paused) el.play();
+        else el.pause();
+        break;
+      case 'back':
+        el.currentTime = Math.max(0, el.currentTime - SEEK_STEP);
+        break;
+      case 'fwd':
+        // duration 可能是 NaN/Infinity（直播、元数据未就绪），那就只按步长前进
+        el.currentTime = Number.isFinite(el.duration)
+          ? Math.min(el.duration, el.currentTime + SEEK_STEP)
+          : el.currentTime + SEEK_STEP;
+        break;
+      case 'prev':
+        seekCue(-1);
+        break;
+      case 'next':
+        seekCue(1);
+        break;
+      case 'rate':
+        el.playbackRate = nextRate(el.playbackRate);
+        break;
+      default:
+        return false;
+    }
+
+    syncBar();
+    return true;
+  }
+
+  /** 先比较再写：浮窗每帧/每秒都会跑一次，无谓的 DOM 变更会白白让合成器重绘 */
+  function setText(el, text) {
+    if (el && el.textContent !== text) el.textContent = text;
+  }
+
+  function setDisabled(el, disabled) {
+    if (el && el.disabled !== disabled) el.disabled = disabled;
+  }
+
+  /** 把 video 的真实状态回显到控制栏（播放/暂停图标、倍速、上下句可用性） */
+  function syncBar() {
+    if (!pipWin) return;
+    const d = pipWin.document;
+    const el = video();
+    const paused = !el || el.paused;
+
+    const toggle = d.getElementById('pip-toggle');
+    setText(toggle, paused ? '▶' : '⏸');
+    if (toggle) {
+      const label = paused ? '播放' : '暂停';
+      if (toggle.getAttribute('aria-label') !== label) toggle.setAttribute('aria-label', label);
+    }
+
+    const rate = d.getElementById('pip-rate');
+    setText(rate, `${el ? el.playbackRate : 1}×`);
+
+    const cues = track.getCues();
+    const current = track.getCurrent();
+    const index = current ? current.index : -1;
+    const canPrev = index > 0
+      || (index === 0 && !!el && el.currentTime - cues[0].start > RESTART_CUE_AFTER);
+    setDisabled(d.getElementById('pip-prev'), !canPrev);
+    setDisabled(d.getElementById('pip-next'), cues.length === 0 || index >= cues.length - 1);
+  }
+
+  /** 播放状态下按钮图标要跟着变，所以要在 video 上直接听这几个事件（心跳只作兜底） */
+  function bindVideoEvents() {
+    const el = video();
+    if (el === boundVideo) return;
+    if (boundVideo) {
+      for (const type of VIDEO_STATE_EVENTS) boundVideo.removeEventListener(type, syncBar);
+    }
+    boundVideo = el;
+    if (boundVideo) {
+      for (const type of VIDEO_STATE_EVENTS) boundVideo.addEventListener(type, syncBar);
+    }
   }
 
   /** 用 PiP 窗口自己的 rAF 驱动进度：宿主窗口最小化时页面侧的 rAF 会停，这个不会 */
@@ -313,6 +863,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     save();
     refreshButton();
     push();
+    bindVideoEvents();
+    syncBar();
     startFrame();
     return true;
   }
@@ -337,20 +889,42 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   function stop() {
     stopFrame();
     pipWin = null;
+    styleEl = null; // 那张 <style> 随窗口一起没了
     lastKey = '';
     refreshButton();
   }
+
+  /**
+   * 控制栏的按钮表：id 为 null 表示不需要单独拿引用的普通按钮。
+   * 文案用媒体控制字符（⏮ ⏭ ▶ ⏸），它们在任何系统字体里都在，不必再塞 SVG。
+   */
+  const BAR_BUTTONS = [
+    { id: 'pip-prev', act: 'prev', glyph: '⏮', label: '上一句' },
+    { id: null, act: 'back', glyph: '−5s', label: '后退 5 秒' },
+    { id: 'pip-toggle', act: 'toggle', glyph: '▶', label: '播放' },
+    { id: null, act: 'fwd', glyph: '+5s', label: '前进 5 秒' },
+    { id: 'pip-next', act: 'next', glyph: '⏭', label: '下一句' },
+    { id: 'pip-rate', act: 'rate', glyph: '1×', label: '倍速（点击循环）' },
+  ];
 
   function buildWindow(win) {
     const d = win.document;
     d.documentElement.style.colorScheme = 'dark';
 
-    const style = d.createElement('style');
-    style.textContent = PIP_CSS;
-    d.head.append(style);
+    styleEl = d.createElement('style');
+    styleEl.textContent = pipCss(appearance);
+    d.head.append(styleEl);
 
     const box = d.createElement('div');
     box.id = 'box';
+
+    const stage = d.createElement('div');
+    stage.id = 'stage';
+
+    // 官方 classic 预设的底板是「整块一个矩形」（.subtitle-group），所以两行外面要有
+    // 一个共同的容器；contrast 的逐行底板改画在 .kline 上（见 plateCss）
+    const plate = d.createElement('div');
+    plate.id = 'plate';
     for (const [lineId, fillId] of [
       ['line-primary', 'fill-primary'],
       ['line-secondary', 'fill-secondary'],
@@ -366,9 +940,36 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       text.id = lineId;
 
       wrap.append(fill, text);
-      box.append(wrap);
+      plate.append(wrap);
     }
+    stage.append(plate);
+
+    const bar = d.createElement('div');
+    bar.id = 'bar';
+    for (const item of BAR_BUTTONS) {
+      const btn = d.createElement('button');
+      btn.type = 'button';
+      btn.dataset.act = item.act;
+      btn.textContent = item.glyph;
+      btn.setAttribute('aria-label', item.label);
+      btn.title = item.label;
+      if (item.id) btn.id = item.id;
+      bar.append(btn);
+    }
+
+    box.append(stage, bar);
     d.body.append(box);
+
+    // 委托：一个监听器覆盖全部按钮，按钮是浮窗自己的，不受页面影响
+    d.addEventListener('click', (ev) => {
+      const target = ev.target;
+      const btn = target && typeof target.closest === 'function'
+        ? target.closest('[data-act]')
+        : null;
+      if (!btn) return;
+      ev.preventDefault();
+      command(btn.dataset.act);
+    });
 
     win.addEventListener('pagehide', () => handlePageHide(win));
   }
@@ -443,6 +1044,9 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     // 双保险：rAF 万一没跑起来（窗口被系统挂起等），这里仍按秒推进
     pushText();
     pushProgress();
+    // 换视频后 video 元素会被换掉，事件监听要跟着换；状态回显也顺带兜底一次
+    bindVideoEvents();
+    syncBar();
   }
 
   // ---------------------------------------------------------------- 启动
@@ -456,7 +1060,16 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       isEnabled: () => enabled,
       isOpen: () => !!pipWin,
       displayPrimary,
+      primaryParts,
+      pipCss: () => pipCss(appearance),
+      parseSettings,
+      getAppearance: () => ({ ...appearance }),
       RECENT_VISIBLE_MS,
+      // 播放控制：测试与 probe 直接驱动 command()，不必模拟浮窗里的点击
+      command,
+      syncBar,
+      RATES,
+      SEEK_STEP,
     },
     configurable: true,
   });
@@ -500,6 +1113,17 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   });
 
   refreshButton();
+
+  // 官方外观设置：启动读一次，之后跟着它的变更走（用户在外观页改字号/颜色/样式/双语）
+  loadAppearance();
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync' || !changes || !(SETTINGS_KEY in changes)) return;
+      applyAppearance(parseSettings(changes[SETTINGS_KEY].newValue));
+    });
+  } catch {
+    // 没有 onChanged（旧实现 / 被裁剪过的包）：那就只在启动时读一次
+  }
 
   chrome.storage.local
     .get(STORE_KEY)

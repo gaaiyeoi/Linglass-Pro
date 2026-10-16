@@ -157,6 +157,69 @@ const LINGLASS_CONTRACT = [
     where: '00-shared.js CONTROL_CSS 的 ::after',
     note: '官方自绘气泡用的属性名，我们沿用同一套',
   },
+  // 官方「外观」设置 —— 桌面字幕浮窗照搬它的字体/字号/颜色/底板/双语（PLAN 008）。
+  // 这些是 chrome.storage.sync 里的字段名与取值，不是 DOM 记号，改版时不会报运行时错，
+  // 只会静默退回官方默认值，所以更要在这里钉住。
+  {
+    probe: 'linglass-settings',
+    selector: null,
+    where: '30-desktop-subtitles.js SETTINGS_KEY',
+    note: '官方外观设置的落盘键（chrome.storage.sync，zustand persist）',
+  },
+  {
+    probe: 'subtitleStyle',
+    selector: null,
+    where: '30-desktop-subtitles.js styleSpecOf() 的 STYLE_SPECS 键',
+    note: '官方样式预设名：classic / cinema / comic / contrast',
+  },
+  {
+    probe: 'subtitleScale',
+    selector: null,
+    where: '30-desktop-subtitles.js fontSizeOf()',
+    note: '官方字号档位（50–150，step 10，默认 100）',
+  },
+  {
+    probe: 'subtitleColor',
+    selector: null,
+    where: '30-desktop-subtitles.js pipCss()',
+    note: '官方字幕颜色（色板 #FFFFFF / #FFD60A / #64D2FF / #30D158）',
+  },
+  {
+    probe: 'dualSubtitles',
+    selector: null,
+    where: '30-desktop-subtitles.js pushText()',
+    note: '官方双语开关：关掉时浮窗也不显示译文行',
+  },
+  {
+    probe: 'learningLanguage',
+    selector: null,
+    where: '30-desktop-subtitles.js fontSizeOf() / fontStackOf()',
+    note: '学习语言：CJK 才放大加粗、comic 预设的日语字面靠它挑',
+  },
+  {
+    probe: 'nativeLanguage',
+    selector: null,
+    where: '30-desktop-subtitles.js fontStackOf()',
+    note: '母语：译文行的字体栈',
+  },
+  {
+    probe: 'subtitle-cache:v6:',
+    selector: null,
+    where: '10-subtitle-track.js SKELETON_PREFIX',
+    note: '官方把整条原文字幕轨缓存在这里的 key 前缀（index.ts 的 Vl / ki()）',
+  },
+  {
+    probe: 'subtitle-cache:index',
+    selector: null,
+    where: '10-subtitle-track.js SKELETON_INDEX_KEY',
+    note: '官方字幕缓存索引：{entries:[{key,cachedAt}]}，最多 50 条、TTL 24h',
+  },
+  {
+    probe: 'secondaryAlpha',
+    selector: null,
+    where: '30-desktop-subtitles.js STYLE_SPECS',
+    note: '官方样式预设里的译文行透明度系数（classic 是 .75）',
+  },
 ];
 
 /** 平台契约：YouTube 的 DOM 与浏览器 API，不属于官方产物，仅登记 */
@@ -166,6 +229,11 @@ const PLATFORM_CONTRACT = [
   { probe: 'ytd-watch-metadata', where: '10-subtitle-track.js readMeta()', note: '视频元信息容器（新版 DOM）' },
   { probe: 'yt-navigate-finish', where: '10-subtitle-track.js / 40-study-panel.js', note: 'YouTube SPA 换视频事件' },
   { probe: 'documentPictureInPicture', where: '30-desktop-subtitles.js', note: '系统级画中画 API（Chromium 116+）' },
+  { probe: 'ytd-app', where: '40-study-panel.js LAYOUT_CSS', note: '顶层容器：面板打开时给它 padding-right，把视频让出来（实测见 probe 的候选对比）' },
+  { probe: '#masthead-container', where: '40-study-panel.js LAYOUT_CSS', note: '固定顶栏，不受 ytd-app 的 padding 影响，需单独让位' },
+  { probe: 'ytd-miniplayer', where: '40-study-panel.js LAYOUT_CSS', note: '固定迷你播放器，需单独让位' },
+  { probe: 'ytd-watch-flexy[fullscreen]', where: '40-study-panel.js isFullscreen()', note: 'YouTube 自己的全屏标记：全屏时面板收起且不让位' },
+  { probe: '#columns #secondary', where: '40-study-panel.js COLUMN_SEL', note: '播放页的推荐列：面板在 watch 页寄生在它里面（YouTube 自己算宽度，所以什么都不挡）；找不到就退回悬浮形态' },
 ];
 
 /** 我们自己的选择器与颜色字面量，不参与官方改版检测 */

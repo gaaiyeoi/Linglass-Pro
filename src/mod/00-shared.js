@@ -33,6 +33,9 @@
     'llg-mod-control-styles',
     'llg-pip-btn-styles', // 早期版本的样式 id，一并清掉
     'llg-study-panel-root',
+    // 40-study-panel.js 注入的页面级让位样式：重载后旧规则必须清掉，
+    // 否则残留的 html[data-llg-panel] 规则会一直压着页面（面板已经没了）
+    'llg-panel-layout-styles',
   ];
   for (const id of STALE_IDS) {
     const el = document.getElementById(id);
