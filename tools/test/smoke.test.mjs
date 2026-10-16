@@ -48,11 +48,15 @@ async function sourceOf(file) {
  * @param {boolean} [options.withColumn] 是否造出播放页的推荐列（`#columns #secondary`）。
  *                                      有它 → 面板走 column 形态（寄生在列里）；
  *                                      没有 → 退回 float 形态（悬浮 + 让位）。
+ * @param {boolean} [options.withStorageGetKeys] 桩上带不带 `chrome.storage.local.getKeys()`。
+ *                                      默认不带 = 老版本 Chrome，骨架的枚举退化路径会走
+ *                                      `get(null)`；打开它测「有 getKeys 就不搬整份 storage」。
  */
 async function harness({
   withPanel = false,
   withPip = false,
   withColumn = false,
+  withStorageGetKeys = false,
   stored = {},
   settings = null,
 } = {}) {
@@ -63,6 +67,12 @@ async function harness({
     primaryPlain: '',
     /** 这一行的原文是否带振假名（`<ruby>夜<rt>よる</rt></ruby>`） */
     primaryRt: false,
+    /**
+     * 原文行的 DOM 子树（只给「带注音」的用例造，见 showRuby）。
+     * 元素用 `{ nodeName, childNodes }`、文本节点用 `{ nodeType: 3, data }` 描述 ——
+     * 够 10-subtitle-track.js 的 readPrimaryRich() 遍历。
+     */
+    primaryNodes: null,
     secondary: '',
     groupDisplay: '',
     primaryDisplay: '',
@@ -70,12 +80,19 @@ async function harness({
     // 播放器
     currentTime: 0,
     duration: 600,
+    /**
+     * 宿主页面里有没有播放器的 video（`#movie_player video`）。
+     * 关掉它 = 还在非播放页（首页 / 搜索页），用来测「这次手势不算数时要重新武装」
+     */
+    hasMoviePlayer: true,
     // 落盘与定时器
     saved: [],
     removed: [],
     stored,
     /** chrome.storage.local.get 被读过的 key（用来断言「没有反复轮询」） */
     storageReads: [],
+    /** chrome.storage.local.getKeys() 被调了几次（枚举退化路径的代价，见 PLAN 014） */
+    storageGetKeysCalls: 0,
     // 官方外观设置（chrome.storage.sync）与它的变更监听器
     sync: settings == null ? {} : { 'linglass-settings': settings },
     syncListeners: [],
@@ -98,6 +115,14 @@ async function harness({
     },
     // 系统级画中画
     pip: { window: null, windows: [], requestCount: 0, deny: false, lastOptions: null },
+    /**
+     * 我们注册到控制栏的按钮（按 id 记下 options）。
+     * 用来调用**真实的** onClick —— 「回到浏览器后点控制栏按钮该开还是该关」这条逻辑
+     * 只有那一个入口，见 h.buttons.get('llg-pip-btn').onClick
+     */
+    buttons: new Map(),
+    /** 当前有没有瞬时用户激活（requestWindow 的门槛，见 h.gesture 与 navigator 桩） */
+    activation: false,
     jaBreakEnabled: true,
   };
 
@@ -167,6 +192,10 @@ async function harness({
     set textContent(v) {
       h.primary = v;
       h.primaryPlain = v;
+    },
+    /** 官方行的真实子树：readPrimaryRich() 会遍历它（只有 showRuby 造的用例才有） */
+    get childNodes() {
+      return h.primaryNodes || [];
     },
     querySelector(selector) {
       return selector === 'rt' && h.primaryRt ? { nodeName: 'RT' } : null;
@@ -238,8 +267,18 @@ async function harness({
       textContent: '',
       innerHTML: '',
       scrollTop: 0,
+      /** 注册过的监听器（按类型），测试用 h.fireOn() 触发 */
+      handlers: {},
+      /** scrollIntoView 的调用参数，用来断言「确实滚到了当前句」 */
+      scrolls: [],
       append(...kids) {
-        for (const kid of kids) node.children.push(kid);
+        // DocumentFragment 在真 DOM 里会被摊平（子节点直接进容器）—— 列表就是靠
+        // 「先把行 append 进 frag、再把 frag append 进 ol」渲染的，不摊平的话
+        // els.list.children[index] 拿到的是那个 fragment，highlight 与跟随就测不出来
+        for (const kid of kids) {
+          if (kid && kid.tagName === 'fragment') node.children.push(...kid.children);
+          else node.children.push(kid);
+        }
       },
       prepend(...kids) {
         node.children.unshift(...kids);
@@ -257,9 +296,26 @@ async function harness({
       removeAttribute(name) {
         delete node.attributes[name];
       },
-      addEventListener() {},
-      removeEventListener() {},
-      scrollIntoView() {},
+      addEventListener(type, fn) {
+        if (!node.handlers[type]) node.handlers[type] = [];
+        node.handlers[type].push(fn);
+      },
+      removeEventListener(type, fn) {
+        const list = node.handlers[type];
+        if (!list) return;
+        const index = list.indexOf(fn);
+        if (index >= 0) list.splice(index, 1);
+      },
+      scrollIntoView(options) {
+        node.scrolls.push(options || null);
+      },
+      /**
+       * 矩形（面板判断「当前句在不在列表可视区内」要拿它比对）。
+       * 默认全 0，也就是「可见」—— 既有用例不受影响；要测滚出视野就临时给 node.rect 赋值。
+       */
+      getBoundingClientRect() {
+        return node.rect || { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      },
       click() {},
       remove() {},
       get firstElementChild() {
@@ -287,17 +343,22 @@ async function harness({
       if (!roles.has(role)) roles.set(role, makeStubNode(`stub:${role}`));
       return roles.get(role);
     };
-    return {
+    const host = {
       roleNode,
+      /** shadow 上的点击监听器（面板用事件委托接所有 data-act），供 h.panelAct() 触发 */
+      clickHandler: null,
       shadow: {
         append: () => {},
-        addEventListener: () => {},
+        addEventListener(type, fn) {
+          if (type === 'click') host.clickHandler = fn;
+        },
         querySelector(selector) {
           const match = /^\[data-role="(.+)"\]$/.exec(selector);
           return match ? roleNode(match[1]) : null;
         },
       },
     };
+    return host;
   }
   let panelHost = null;
 
@@ -349,6 +410,13 @@ async function harness({
       body: el('body'),
       handlers: {},
       createElement: (tagName) => el(tagName),
+      // 浮窗渲染原文行时会用文本节点（真 DOM 里 <ruby> 的第一个子节点就是 Text）
+      createTextNode: (text) => ({
+        nodeType: 3,
+        textContent: String(text),
+        data: String(text),
+        children: [],
+      }),
       getElementById: (id) => byId.get(id) ?? null,
       addEventListener(type, fn) {
         if (!doc.handlers[type]) doc.handlers[type] = [];
@@ -430,7 +498,15 @@ async function harness({
   const sandbox = {
     console,
     URL,
-    navigator: { clipboard: { writeText: () => Promise.resolve() } },
+    navigator: {
+      clipboard: { writeText: () => Promise.resolve() },
+      // 瞬时用户激活。桌面字幕在调 requestWindow() 之前会问它一句（见 hasActivation()）
+      userActivation: {
+        get isActive() {
+          return h.activation;
+        },
+      },
+    },
     confirm: () => true,
     requestAnimationFrame: () => 0,
     cancelAnimationFrame: () => {},
@@ -445,6 +521,14 @@ async function harness({
       h.windowEvents.push(ev && ev.type);
       return true;
     },
+    // 30-desktop-subtitles.js 会把 wake() 挂到 window 的 focus 上（window 就是本沙箱），
+    // 40-study-panel.js 拖拽改宽时也会用 window 上的 pointermove / pointerup
+    addEventListener: (type, fn) => h.listeners(type).push(fn),
+    removeEventListener: (type, fn) => {
+      const list = h.listeners(type);
+      const index = list.indexOf(fn);
+      if (index >= 0) list.splice(index, 1);
+    },
     location: { href: WATCH_URL, pathname: '/watch' },
     document: {
       title: 'テスト動画 - YouTube',
@@ -453,7 +537,7 @@ async function harness({
       documentElement,
       getElementById: (id) => (id === 'linglass-subtitle-overlay' ? host : null),
       querySelector: (selector) => {
-        if (selector === '#movie_player video') return video;
+        if (selector === '#movie_player video') return h.hasMoviePlayer ? video : null;
         if (selector === 'ytd-watch-flexy') return flexy;
         if (selector === 'ytd-watch-flexy[fullscreen]') return h.youtubeFullscreen ? flexy : null;
         if (selector === '#columns #secondary') return column;
@@ -502,6 +586,16 @@ async function harness({
             }
             return Promise.resolve(out);
           },
+          // 只在新版 Chrome 上有（Chrome 130+）。默认不给 —— 缺了它才走 get(null) 退化路径，
+          // 两条路各有用例（见 PLAN 014 的「索引里没有就自己列」）
+          ...(withStorageGetKeys
+            ? {
+              getKeys: () => {
+                h.storageGetKeysCalls += 1;
+                return Promise.resolve(Object.keys(h.stored));
+              },
+            }
+            : {}),
           set: (entry) => {
             h.saved.push(entry);
             return Promise.resolve();
@@ -544,9 +638,13 @@ async function harness({
   vm.runInContext('globalThis.window = globalThis;', sandbox);
 
   // 00-shared.js 的桩：只提供 40-study-panel.js 实际用到的四件事。
-  // ensureButton 恒返回 false —— 让 refreshButton() 立刻短路，避免测试去碰控制栏。
+  // ensureButton 恒返回 false —— 让 refreshButton() 立刻短路，避免测试去碰控制栏；
+  // 但 options 要记下来：控制栏按钮的 onClick 是「点回来该开还是该关」唯一的入口。
   sandbox.__llgModShared = {
-    ensureButton: () => false,
+    ensureButton: (options) => {
+      h.buttons.set(options.id, options);
+      return false;
+    },
     setButtonState: () => {},
     injectStyle: () => {},
     registerFeature: (feature) => h.features.push(feature),
@@ -588,30 +686,76 @@ async function harness({
     // 让微任务队列跑干净（save()/flush() 都是 async）
     for (let i = 0; i < 8; i += 1) await Promise.resolve();
   };
-  /** 触发一次用户手势（桌面字幕靠它拿到瞬时激活） */
-  h.gesture = (type = 'pointerdown') => {
-    for (const fn of [...h.listeners(type)]) fn();
+  /**
+   * 触发一次用户手势（桌面字幕靠它拿到瞬时激活）。
+   *
+   * 瞬时激活只覆盖**事件处理器的同步调用链**（open() 在回调里同步调 requestWindow，
+   * 等它 await 回来时已经不需要激活了），所以这里也只在调用监听器期间把它置真。
+   * `ev` 用来模拟「这次手势落在哪个元素上」（桌面字幕据此跳过我们自己的按钮/开关）。
+   */
+  h.gesture = (type = 'pointerdown', ev = null) => {
+    h.withActivation(() => {
+      for (const fn of [...h.listeners(type)]) fn(ev);
+    });
+  };
+  /**
+   * 在「有瞬时用户激活」的窗口里跑一段**同步**代码。
+   *
+   * 与 h.gesture 的区别：手势是「某个事件被派发时恰好带激活」，而这里用来模拟
+   * 「用户是点着页面回到浏览器本体的」——那一刻没有页面事件，但激活仍在有效期内，
+   * open() 因此能当场把浮窗开回来（见 30- 的 wake()）。
+   */
+  h.withActivation = (fn) => {
+    h.activation = true;
+    try {
+      return fn();
+    } finally {
+      h.activation = false;
+    }
   };
   /** 切换页面可见性并广播 visibilitychange */
   h.setVisibility = (state) => {
     h.visibilityState = state;
     for (const fn of [...h.listeners('visibilitychange')]) fn();
   };
+  /** 广播 window 的 focus（用户从别的应用点回浏览器 / 从最小化恢复） */
+  h.focus = () => {
+    for (const fn of [...h.listeners('focus')]) fn();
+  };
   h.lastPipWindow = () => h.pip.windows[h.pip.windows.length - 1] || null;
+  /**
+   * 浮窗节点的文本，**跳过 rt** —— 注音不算原文（与字幕轨道同一口径）。
+   * 纯文本渲染时 line 里是 span，富渲染（官方行有注音）时是「文本节点 + <ruby>」。
+   */
+  function pipPlain(node) {
+    if (!node) return '';
+    if (node.nodeType === 3) return node.textContent || '';
+    if (node.tagName === 'rt') return '';
+    if (!node.children || !node.children.length) return node.textContent || '';
+    return node.children.map(pipPlain).join('');
+  }
+
+  /** <ruby> 里的注音（rt 的文本） */
+  function pipRuby(node) {
+    const rt = (node.children || []).find((kid) => kid.tagName === 'rt');
+    return rt ? rt.textContent || '' : '';
+  }
+
   h.pipText = () => {
     const win = h.lastPipWindow();
     const line = win && win.document.getElementById('line-primary');
-    if (!line) return null;
-    // 原文行是「文本节点 + <span class="llg-sep">」拼出来的，拼回去才等于画出来的文字
-    if (line.children.length) return line.children.map((kid) => kid.textContent).join('');
-    return line.textContent;
+    return line ? pipPlain(line) : null;
   };
-  /** 原文行的片段结构（文本 / 分隔符），用来断言分隔符是独立节点 */
+  /** 原文行的片段结构（文本 / 分隔符 / 注音），用来断言分隔符独立成节点、注音成 ruby */
   h.pipSegments = () => {
     const win = h.lastPipWindow();
     const line = win && win.document.getElementById('line-primary');
     if (!line) return null;
-    return line.children.map((kid) => ({ text: kid.textContent, sep: kid.className === 'llg-sep' }));
+    return line.children.map((kid) => ({
+      text: pipPlain(kid),
+      sep: kid.className === 'llg-sep',
+      ruby: kid.tagName === 'ruby' ? pipRuby(kid) : '',
+    }));
   };
   /** 浮窗当前生效的那张样式表（字号/颜色/底板都在里面） */
   h.pipCss = () => {
@@ -677,6 +821,26 @@ async function harness({
     column.id = 'secondary';
     return column;
   };
+  /** 触发面板里某个角色节点上的监听器（例如列表的 wheel / 某一行的 click） */
+  h.fireOn = (role, type, ev = {}) => {
+    const node = h.panelRole(role);
+    const handlers = node && node.handlers ? node.handlers[type] : null;
+    if (!handlers || !handlers.length) return false;
+    for (const fn of [...handlers]) fn(ev);
+    return true;
+  };
+  /**
+   * 走面板的真实点击委托：造一个带 closest() 的目标（必须是沙箱里 Element 的实例，
+   * 源码里有 `ev.target instanceof Element` 的判断），交给 shadow 上的 click 监听器。
+   */
+  h.panelAct = (act) => {
+    const handler = panelHost && panelHost.clickHandler;
+    if (!handler) return false;
+    const target = Object.create(sandbox.Element.prototype);
+    target.closest = (selector) => (selector === '[data-act]' ? { dataset: { act } } : null);
+    handler({ target });
+    return true;
+  };
   /** 让位是否生效：<html> 上的标记 / 宽度变量 / 注入的页面级样式 */
   h.panelLayoutOn = () => documentElement.attributes['data-llg-panel'] !== undefined;
   h.panelWidthVar = () => documentElement.style.getPropertyValue('--llg-panel-w');
@@ -732,6 +896,42 @@ function showFurigana(h, full, plain, secondary = '') {
   h.primaryRt = true;
   h.primary = full;
   h.primaryPlain = plain;
+  h.secondary = secondary;
+  h.tick();
+}
+
+/**
+ * 让当前原文行变成「官方渲染了 <ruby>/<rt>」的样子。
+ *
+ * tokens 是这一行的片段：`{ text: '夜', ruby: 'よる' }` 或纯文本 `{ text: '、' }`。
+ * 既给 textContent（含注音的「夜よる」），也给剥掉 rt 的文本，还给一棵可遍历的子树 ——
+ * readLines() 读前者剥干净的结果，readPrimaryRich() 遍历后者拿注音。
+ */
+function showRuby(h, tokens, secondary = '') {
+  let full = '';
+  let plain = '';
+  const nodes = [];
+
+  for (const token of tokens) {
+    full += token.text + (token.ruby || '');
+    plain += token.text;
+    if (token.ruby) {
+      nodes.push({
+        nodeName: 'RUBY',
+        childNodes: [
+          { nodeType: 3, data: token.text, textContent: token.text },
+          { nodeName: 'RT', textContent: token.ruby, childNodes: [] },
+        ],
+      });
+    } else {
+      nodes.push({ nodeType: 3, data: token.text, textContent: token.text });
+    }
+  }
+
+  h.primaryRt = true;
+  h.primary = full;
+  h.primaryPlain = plain;
+  h.primaryNodes = nodes;
   h.secondary = secondary;
   h.tick();
 }
@@ -1102,10 +1302,17 @@ test('字幕轨道：拿不到官方缓存就退回旧行为（只记录播放�
   assert.equal(track.getCues().length, 1);
   assert.equal(track.getCues()[0].secondary, '测试');
 
-  // 索引读不到时最多重试几次，绝不跟着心跳一直轮询
-  for (let i = 0; i < 8; i += 1) h.tick();
+  // 索引读不到时会重试（官方写缓存晚于我们打开面板，见 PLAN 014 的根因），
+  // 但**有限**：窗口（SKELETON_MAX_TRIES 次心跳）用完就彻底停手，不跟着心跳一直轮询。
+  // ⚠️ 断言在 PLAN 014 里从「≤ 4 次」改为下面这两条：旧值固化了「试 4 次就放弃」的旧语义，
+  // 而那正是「列表只看得到播放过的句子」的原因（见该 PLAN 的「为什么改断言」）。
+  for (let i = 0; i < 200; i += 1) {
+    h.tick();
+    await h.drain();
+  }
   const indexReads = h.storageReads.filter((key) => key === 'subtitle-cache:index').length;
-  assert.ok(indexReads <= 4, `索引最多读 4 次（实际 ${indexReads} 次）`);
+  assert.ok(indexReads >= 2, `必须真的重试，不能试一次就放弃（实际 ${indexReads} 次）`);
+  assert.ok(indexReads <= 61, `重试次数要有上限（实际 ${indexReads} 次）`);
 });
 
 test('字幕轨道：换视频后重新找骨架（上一个视频的骨架不能串台）', async () => {
@@ -1122,6 +1329,96 @@ test('字幕轨道：换视频后重新找骨架（上一个视频的骨架不�
 
   assert.equal(track.getCues().length, 0, '新视频既没有本地轨道也没有缓存 → 空轨道');
   assert.equal(track.getMeta().id, 'zzz999');
+});
+
+test('字幕轨道：索引里暂时没有本视频时，官方稍后写入仍能被采用', async () => {
+  // 索引里有**别的视频**的条目，但还没有当前视频的 —— 这是官方写缓存晚于页面
+  // （用户先看过别的视频、本次刚打开这一条）时的常态。
+  const otherKey = 'subtitle-cache:v6:other999:ja:primary';
+  const { h, track } = await harness({
+    stored: {
+      'subtitle-cache:index': { entries: [{ key: otherKey, cachedAt: 1000 }] },
+      [otherKey]: { cues: SKELETON_CUES },
+    },
+  });
+  await h.drain();
+  await h.drain();
+
+  // 改动前这里会永久放弃骨架（空结果被当成「已经列过索引」），列表从此只剩播放过的句子
+  assert.equal(track.getCues().length, 0, '官方还没写本视频的缓存 → 现在只有空轨道');
+
+  Object.assign(h.stored, officialCache(SKELETON_CUES));
+  h.tick();
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 3, '官方稍后补上的骨架必须能被采用（不能永久放弃）');
+  assert.equal(track.getCues()[0].primary, 'おはよう');
+});
+
+/**
+ * 实测（本机 chrome.storage.local，2026-10-16）：官方索引里只有 13 条，而 storage 里躺着
+ * 20 多条 subtitle-cache 值 —— **值比索引活得久**（索引有条数上限与 TTL，被挤掉的是索引条目，
+ * 不是值）。索引里没有当前视频的条目时，如果就此放弃，轨道就只剩「播放过的句子」，
+ * 进度条的分母退化成「全片时长的中位数」（见 PLAN 014 的根因：实测同一视频里句长
+ * 1.3s～5.4s，中位数约 4s —— 1.3s 那句的进度条只走到 32% 就换行了）。
+ */
+test('字幕轨道：官方索引里没有这条时，直接从 storage 里把骨架捞出来', async () => {
+  const key = `subtitle-cache:v6:${VIDEO_ID}:ja:primary`;
+  const { h, track } = await harness({
+    stored: { [key]: { cues: SKELETON_CUES, videoId: VIDEO_ID, primaryLang: 'ja' } },
+  });
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 3, '索引里没有也必须捞到骨架');
+  assert.equal(track.getCues()[1].primary, 'きょうは あめ です');
+  assert.equal(track.getProgressEnd(), 2.5, '分母是骨架里下一句的真实起点');
+
+  // 播到第一句的中点：官方起点 0 → 2.5 的中点就是 1.25s。
+  // 没有骨架的话分母会是 start + 估计时长（首句无样本 → 6s），这里会变成 0.208。
+  h.currentTime = 1.25;
+  show(h, 'おはよう', '早安');
+  assert.equal(track.getProgress(), 0.5, '分母 2.5 来自骨架，不是估计时长');
+  assert.equal(track.getCues().length, 3, '采到的句子贴回骨架，不新建');
+
+  const wroteOfficial = h.saved.some((entry) =>
+    Object.keys(entry).some((name) => name.startsWith('subtitle-cache:')));
+  assert.equal(wroteOfficial, false, '官方缓存只能读，不能写');
+});
+
+test('字幕轨道：有 getKeys() 就不搬整份 storage（老版本才退回 get(null)）', async () => {
+  const key = `subtitle-cache:v6:${VIDEO_ID}:ja:primary`;
+  const { h, track } = await harness({
+    withStorageGetKeys: true,
+    stored: { [key]: { cues: SKELETON_CUES } },
+  });
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 3, '枚举这条路同样要能捞到骨架');
+  assert.ok(h.storageGetKeysCalls >= 1, '应当用 getKeys() 列 key');
+  assert.equal(
+    h.storageReads.filter((name) => name == null).length,
+    0,
+    '有 getKeys() 就不该把整份 storage 搬进内存',
+  );
+});
+
+test('字幕轨道：列不到骨架时，枚举 storage 不能变成每次心跳都翻一遍', async () => {
+  const { h, track } = await harness({ stored: { 'subtitle-cache:index': { entries: [] } } });
+  await h.drain();
+  await h.drain();
+
+  for (let i = 0; i < 60; i += 1) {
+    h.tick();
+    await h.drain();
+  }
+
+  assert.equal(track.getCues().length, 0, '确实没有骨架，轨道就只记播放过的句子');
+  const enums = h.storageReads.filter((name) => name == null).length;
+  assert.ok(enums >= 1, `至少要真的去列一次 storage（实际 ${enums} 次）`);
+  assert.ok(enums <= 12, `枚举要限次：60 次心跳不该等于 60 次枚举（实际 ${enums} 次）`);
 });
 
 test('标点与空白：字幕文本被归一成单行', async () => {
@@ -1396,6 +1693,95 @@ test('学习面板：切剧场模式后要补一次 resize（否则 video 尺寸
   assert.equal(h.panelWidthVar(), '400px', '标记没再变就不该反复补');
 });
 
+test('学习面板：滚开之后能一键回到当前句', async () => {
+  const { h, track } = await harness({ withPanel: true, withColumn: true });
+  await h.drain();
+  h.togglePanel();
+  await h.drain();
+
+  const follow = h.panelRole('follow');
+  assert.equal(follow.dataset.state, 'off', '默认跟随中，按钮收着');
+
+  h.currentTime = 1;
+  show(h, 'いち', '一');
+  h.currentTime = 3;
+  show(h, 'に', '二');
+  h.currentTime = 5;
+  show(h, 'さん', '三');
+  assert.equal(track.getCues().length, 3);
+
+  const list = h.panelRole('list');
+  assert.equal(list.children.length, 3, '三句都渲染成了行');
+
+  // 用户滚去看别的句子 → 停止跟随（不然他根本看不了后面的），按钮随之出现
+  assert.equal(h.fireOn('list', 'wheel'), true, '列表要能收到滚轮事件');
+  assert.equal(follow.dataset.state, 'on', '滚开之后按钮要出现');
+
+  // 点「回到当前句」：走真实点击委托 → 滚到正在播放的那一句（居中）→ 恢复跟随
+  for (const row of list.children) row.scrolls.length = 0;
+  assert.equal(h.panelAct('follow'), true, '点击委托要能走到 follow');
+  assert.equal(follow.dataset.state, 'off', '回到当前句之后按钮收起');
+  assert.equal(list.children[2].scrolls.length, 1, '滚的应该是当前句（第 3 句）');
+  assert.equal(list.children[2].scrolls[0].block, 'center', '按按钮那一下要居中，让用户看清在哪');
+  assert.equal(list.children[0].scrolls.length, 0, '别的行不该被动到');
+});
+
+test('学习面板：拖滚动条滚开后同样能一键回到当前句', async () => {
+  const { h } = await harness({ withPanel: true, withColumn: true });
+  await h.drain();
+  h.togglePanel();
+  await h.drain();
+
+  h.currentTime = 1;
+  show(h, 'いち', '一');
+  h.currentTime = 3;
+  show(h, 'に', '二');
+  h.currentTime = 5;
+  show(h, 'さん', '三');
+
+  const list = h.panelRole('list');
+  const follow = h.panelRole('follow');
+
+  // 先让面板记住「当前句」（等于播放时的自动跟随把它定位过一次）
+  assert.equal(h.panelAct('follow'), true);
+  assert.equal(follow.dataset.state, 'off', '还在跟随，按钮收着');
+
+  // 跟随中的程序化滚动（highlight → scrollIntoView）也会发 scroll：
+  // 当前行还在视野里 → 不能误关跟随
+  list.rect = { top: 0, bottom: 300, left: 0, right: 320 };
+  list.children[2].rect = { top: 40, bottom: 80, left: 0, right: 320 };
+  assert.equal(h.fireOn('list', 'scroll'), true, '列表要能收到 scroll 事件');
+  assert.equal(follow.dataset.state, 'off', '当前行可见 → 不该误关跟随');
+
+  // 拖滚动条把当前句滚出视野（只发 scroll、不发 wheel）→ 按钮浮出来
+  list.children[2].rect = { top: 420, bottom: 460, left: 0, right: 320 };
+  h.fireOn('list', 'scroll');
+  assert.equal(follow.dataset.state, 'on', '当前句滚出视野 → 「回到当前句」要出现');
+
+  // 点它：回到当前句（居中）并恢复跟随
+  for (const row of list.children) row.scrolls.length = 0;
+  assert.equal(h.panelAct('follow'), true);
+  assert.equal(follow.dataset.state, 'off', '回到当前句之后按钮收起');
+  assert.equal(list.children[2].scrolls[0].block, 'center', '按按钮那一下要居中');
+});
+
+test('学习面板：当前句块排在列表之后（贴在面板底部）', async () => {
+  const source = await sourceOf('40-study-panel.js');
+  const block = source.match(/const PANEL_HTML = `([\s\S]*?)`;/);
+  assert.ok(block, '源码里要有 PANEL_HTML 模板');
+
+  const markup = block[1];
+  const listAt = markup.indexOf('data-role="list"');
+  const stageAt = markup.indexOf('class="stage"');
+  const footAt = markup.indexOf('class="foot"');
+  const followAt = markup.indexOf('data-role="follow"');
+  assert.ok(listAt >= 0 && stageAt >= 0 && footAt >= 0 && followAt >= 0, '四个区块都要在');
+
+  assert.ok(listAt < stageAt, '当前句块要排在列表之后（沉到面板底部，与原生字幕同高）');
+  assert.ok(stageAt < footAt, '当前句块要在页脚之上');
+  assert.ok(followAt > listAt && followAt < stageAt, '「回到当前句」挂在列表区域里（不再占 header）');
+});
+
 test('学习面板：把功能登记进设置面板注册表', async () => {
   const { h } = await harness({ withPanel: true });
 
@@ -1430,7 +1816,7 @@ test('桌面字幕：默认开启，但要等第一次用户手势才真正开�
   assert.equal(h.saved.at(-1).llgPip.enabled, true, '常驻开关要落盘');
 });
 
-test('桌面字幕：切回浏览器时被 UA 关掉，会自己回来', async () => {
+test('桌面字幕：切回浏览器时被 UA 关掉，下一次手势把它接回来', async () => {
   const { sandbox, h } = await harness({ withPip: true });
   const pip = sandbox.__llgModPip;
 
@@ -1443,9 +1829,16 @@ test('桌面字幕：切回浏览器时被 UA 关掉，会自己回来', async (
   first.fire('pagehide');     // UA 就在这一刻把它关了
   await h.drain();
 
-  assert.equal(h.pip.requestCount, 2, '应当立刻重开一次');
-  assert.equal(pip.isOpen(), true);
+  // UA 关窗与「文档卸载」一样不带瞬时激活，这一刻 requestWindow() 必然被拒 ——
+  // 所以不去撞它，静默武装等下一次手势（见 open() 的 hasActivation()）
+  assert.equal(h.pip.requestCount, 1, '没有激活就别试着开');
+  assert.equal(pip.isOpen(), false);
   assert.equal(pip.isEnabled(), true, '这次不是用户关的，开关要保持开着');
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true, '下一次手势就回来');
+  assert.equal(h.pip.requestCount, 2);
 });
 
 test('桌面字幕：显式关闭之后不再自动弹回来', async () => {
@@ -1467,19 +1860,85 @@ test('桌面字幕：显式关闭之后不再自动弹回来', async () => {
   assert.equal(h.pip.requestCount, 1, '关掉之后任何手势都不许再开');
 });
 
-test('桌面字幕：用户点 PiP 窗口自己的 X 也算显式关闭', async () => {
+test('桌面字幕：点 PiP 窗口自己的 X 关不掉它（只有按钮才算关闭）', async () => {
   const { sandbox, h } = await harness({ withPip: true });
   const pip = sandbox.__llgModPip;
 
   h.gesture();
   await h.drain();
+  assert.equal(pip.isOpen(), true);
 
-  // 页面一直可见 → 不是「切回浏览器」那种关闭，而是用户自己关的
+  // 页面一直可见地把窗口关掉：可能是用户点了 X，也可能是文档正在卸载（刷新/导航）——
+  // 两者在 pagehide 里区分不了，所以一律不当作关闭
   h.lastPipWindow().fire('pagehide');
   await h.drain();
 
-  assert.equal(pip.isEnabled(), false);
-  assert.equal(h.pip.requestCount, 1, '不该自己弹回来');
+  assert.equal(pip.isEnabled(), true, '点 X 不算关闭，开关要保持开着');
+  assert.ok(
+    !h.saved.some((entry) => entry.llgPip && entry.llgPip.enabled === false),
+    'pagehide 里绝不允许把常驻开关写成关（刷新页面就会走到这里）',
+  );
+
+  // 「回来」要等一次手势：点 X 的那一下落在 PiP 窗口的文档上，opener 文档没有瞬时激活，
+  // requestWindow() 此刻开不出来（旧断言假定它立刻就能开回来 —— 那是桩不检查激活的假象）
+  assert.equal(h.pip.requestCount, 1);
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true, '下一次手势就回来');
+  assert.equal(h.pip.requestCount, 2);
+});
+
+test('桌面字幕：窗口被系统悄悄销毁（pagehide 没走到我们这里）时，心跳把它弄回来', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true);
+
+  h.pip.window = null; // 系统直接销毁，pagehide 没送到我们手里
+  h.tick();
+  await h.drain();
+
+  // 心跳发现 pipWin 与实际不一致 → 清干净状态并武装；但定时器回调里没有用户激活，
+  // requestWindow() 此刻开不出来，所以要等下一次手势（旧断言假定心跳能直接开回来）
+  assert.equal(pip.isOpen(), false);
+  assert.equal(h.pip.requestCount, 1);
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true, '下一次手势把它接回来');
+  assert.equal(h.pip.requestCount, 2);
+});
+
+test('桌面字幕：还不是播放页时的第一次手势不会被丢掉', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  // 从首页点视频封面的那一刻：SPA 导航还没完成，页面上还没有 #movie_player
+  h.hasMoviePlayer = false;
+  h.gesture();
+  await h.drain();
+  assert.equal(h.pip.requestCount, 0, '还不是播放页，不能开窗');
+
+  // 导航完成后，用户下一次点击就该接住 —— 不靠 1s 心跳重新武装
+  h.hasMoviePlayer = true;
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true);
+  assert.equal(h.pip.requestCount, 1);
+});
+
+test('桌面字幕：判据是「播放页里有 video」，不再看 pathname（直播页也能开）', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  sandbox.location.pathname = '/live/abc123'; // 直播页同样有 #movie_player
+  h.gesture();
+  await h.drain();
+
+  assert.equal(pip.isOpen(), true);
+  assert.equal(h.pip.requestCount, 1);
 });
 
 test('桌面字幕：恢复时没有用户手势，就等到下一次手势', async () => {
@@ -1489,21 +1948,148 @@ test('桌面字幕：恢复时没有用户手势，就等到下一次手势', as
   h.gesture();
   await h.drain();
 
-  h.pip.deny = true; // 模拟 requestWindow 被拒（此刻没有瞬时激活）
+  // 刷新 / 真导航 / 系统悄悄收走窗口：这一刻都没有瞬时激活
   h.setVisibility('hidden');
   h.setVisibility('visible');
   h.lastPipWindow().fire('pagehide');
   await h.drain();
 
   assert.equal(pip.isOpen(), false);
-  assert.equal(h.pip.requestCount, 2, '会先试一次');
+  assert.equal(
+    h.pip.requestCount, 1,
+    '没有激活就别去撞 requestWindow（必然被拒，还会刷一条红字），直接等手势',
+  );
 
-  h.pip.deny = false;
   h.gesture(); // 下一次手势把它接住
   await h.drain();
 
   assert.equal(pip.isOpen(), true);
+  assert.equal(h.pip.requestCount, 2);
+});
+
+test('桌面字幕：有激活但被系统拒绝时，仍然等到下一次手势', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.pip.deny = true; // requestWindow 被系统拒绝
+  h.gesture();       // 但这次手势确实带着瞬时激活
+  await h.drain();
+
+  assert.equal(h.pip.requestCount, 1, '有激活就该试一次，失败了才等下一次');
+  assert.equal(pip.isOpen(), false);
+
+  h.pip.deny = false;
+  h.gesture();
+  await h.drain();
+
+  assert.equal(pip.isOpen(), true);
+  assert.equal(h.pip.requestCount, 2);
+});
+
+test('桌面字幕：窗口被浏览器收走后，控制栏按钮那一下是「开回来」而不是把常驻开关关掉', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true);
+
+  // 浏览器把窗口收走了，而 pagehide 还没送到我们手里（心跳也还没跑到）—— pipWin 是陈旧的
+  h.pip.window = null;
+
+  const btn = h.buttons.get('llg-pip-btn');
+  assert.ok(btn, '控制栏按钮要注册过（它的 onClick 是这条逻辑唯一的入口）');
+  h.withActivation(() => btn.onClick()); // 用户点控制栏按钮，这一下带着瞬时激活
+  await h.drain();
+
+  assert.equal(pip.isEnabled(), true, '这一次不是用户要关它，常驻开关必须保持开着');
+  assert.ok(
+    !h.saved.some((entry) => entry.llgPip && entry.llgPip.enabled === false),
+    '绝不允许把常驻开关写成关（旧写法走 close()，功能就这么被关掉了）',
+  );
+  assert.equal(h.pip.requestCount, 2, '这一点应该用来把窗口开回来');
+  assert.equal(pip.isOpen(), true);
+});
+
+test('桌面字幕：回到浏览器本体时，那一下带着激活就当场把窗口开回来', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true);
+
+  // ① 切回标签页（visibilitychange）：窗口已被浏览器收走，本地 pipWin 陈旧。
+  //    用户是「点着页面回来」的 → 这一刻还在瞬时激活有效期内 → 应当当场开回来
+  h.pip.window = null;
+  h.withActivation(() => h.setVisibility('visible'));
+  await h.drain();
+
+  assert.equal(pip.isOpen(), true, '可见性回来的那一下就该把它接回来');
+  assert.equal(h.pip.requestCount, 2);
+
+  // ② 窗口重新获得焦点（window focus）：从别的应用点回来时 visibilityState 未必跃迁，
+  //    光靠 visibilitychange 会漏掉这个时机
+  h.pip.window = null;
+  h.setVisibility('hidden');
+  h.withActivation(() => h.focus());
+  await h.drain();
+
+  assert.equal(pip.isOpen(), true, '焦点回来的那一下同样要接');
   assert.equal(h.pip.requestCount, 3);
+});
+
+test('桌面字幕：窗口自称 closed（API 的引用还没更新）时，心跳清干净并武装', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.gesture();
+  await h.drain();
+
+  // 窗口已经从内部关掉了，但 documentPictureInPicture.window 还指着它 ——
+  // 只比身份的判据会以为「一切正常」，窗口就永远回不来
+  h.lastPipWindow().closed = true;
+  h.tick();
+  await h.drain();
+
+  assert.equal(pip.isOpen(), false, '心跳要把陈旧的状态清掉');
+  assert.equal(pip.isEnabled(), true, '这不是用户关的，开关保持开着');
+  assert.equal(h.pip.requestCount, 1, '心跳里没有瞬时激活，不能硬开');
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true, '下一次手势接回来');
+  assert.equal(h.pip.requestCount, 2);
+});
+
+test('桌面字幕：只有页面上的普通手势才预开，我们自己的按钮/开关不抢跑', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  // ① 控制栏里的「桌面字幕」按钮：这一下点击归按钮自己的 onClick，
+  //    arm() 若在 pointerdown 阶段先 open()，紧接着的 click 就会看到「已经开着」
+  //    而把它 close() 掉（还会把 enabled 落盘成关）
+  const btn = { nodeType: 1, id: 'llg-pip-btn', closest: () => null };
+  h.gesture('pointerdown', { composedPath: () => [btn] });
+  await h.drain();
+  assert.equal(h.pip.requestCount, 0, '按钮上的手势不许预开');
+  assert.equal(pip.isEnabled(), true, '也不许被谁写成关');
+
+  // ② 设置面板里的开关：它自己就是 [data-llg-toggle]。真实 DOM 里它在 Linglass 的
+  //    shadowRoot 内，事件冒到 document 时 target 已被重定向成宿主元素 ——
+  //    只有 composedPath() 能看见它，所以判据必须走 composedPath()
+  const toggle = { nodeType: 1, id: '' };
+  toggle.closest = (sel) => (sel === '[data-llg-toggle]' ? toggle : null);
+  h.gesture('pointerdown', { composedPath: () => [toggle] });
+  await h.drain();
+  assert.equal(h.pip.requestCount, 0, '开关上的手势同样不许预开');
+
+  // ③ 页面上的普通手势（点播放器区域之类）：照旧预开 —— 上面两条只挡我们自己的 UI
+  const blank = { nodeType: 1, id: 'somewhere-on-the-page', closest: () => null };
+  h.gesture('pointerdown', { composedPath: () => [blank] });
+  await h.drain();
+  assert.equal(pip.isOpen(), true, '普通手势该开就开');
+  assert.equal(h.pip.requestCount, 1);
 });
 
 test('桌面字幕：落盘里关掉的开关，下次加载不会被重新打开', async () => {
@@ -1556,6 +2142,80 @@ test('桌面字幕：浮窗原文行真的带上了分隔符', async () => {
   h.tick();
   assert.equal(h.pipText(), '昨日買った本を読む');
   assert.equal(sandbox.__llgModPip.isOpen(), true);
+});
+
+// ---------------------------------------------------------------- 浮窗的振假名
+
+test('桌面字幕：官方原文行带注音时，浮窗渲染成 ruby（跟随官方）', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  h.jaBreakEnabled = false;
+
+  h.currentTime = 5;
+  showRuby(h, [
+    { text: '夜', ruby: 'よる' },
+    { text: 'に' },
+    { text: '本', ruby: 'ほん' },
+    { text: 'を' },
+  ], '晚上看书');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+
+  const segments = h.pipSegments();
+  assert.deepEqual(segments.map((seg) => seg.text), ['夜', 'に', '本', 'を']);
+  assert.deepEqual(segments.map((seg) => seg.ruby), ['よる', '', 'ほん', ''],
+    '有注音的片段渲染成 <ruby><rt>，其余是普通文本');
+  assert.equal(h.pipText(), '夜に本を', '注音不算原文（与字幕轨道同一口径）');
+});
+
+test('桌面字幕：官方原文行没有注音时，浮窗一个字符都不变', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  h.jaBreakEnabled = false;
+
+  h.currentTime = 5;
+  show(h, '夜に本を', '晚上看书');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+
+  const segments = h.pipSegments();
+  assert.equal(segments.length, 1, '没有注音就走原来的纯文本路径');
+  assert.equal(segments[0].ruby, '');
+  assert.equal(h.pipText(), '夜に本を');
+});
+
+test('桌面字幕：注音与文节分隔符共存，切点落在注音片段内时放弃那个切点', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+
+  h.currentTime = 5;
+  showRuby(h, [
+    { text: '昨日', ruby: 'きのう' },
+    { text: '買った' },
+    { text: '本', ruby: 'ほん' },
+    { text: 'を' },
+    { text: '読む' },
+  ], '昨天买了书');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+
+  assert.equal(h.pipText(), '昨日|買った|本を|読む', '分隔符与注音在同一行里共存');
+  const rubies = h.pipSegments()
+    .filter((seg) => seg.ruby)
+    .map((seg) => `${seg.text}/${seg.ruby}`);
+  assert.deepEqual(rubies, ['昨日/きのう', '本/ほん']);
+
+  // 切点落在带注音的片段内部：放弃这个分隔符，但绝不把带注音的汉字切成两半
+  const segs = sandbox.__llgModPip.richSegments(
+    [{ text: '昨日', ruby: 'きのう' }, { text: '買った', ruby: '' }],
+    [1, 4],
+  );
+  assert.equal(segs.length, 2);
+  assert.equal(segs[0].map((token) => token.text).join(''), '昨日買っ');
+  assert.equal(segs[1].map((token) => token.text).join(''), 'た');
 });
 
 // ---------------------------------------------------------------- 浮窗跟随官方外观

@@ -30,6 +30,9 @@
   const HOST_ID = 'linglass-subtitle-overlay';
   const STORE_PREFIX = 'llgTrack:';
 
+  /** Node.TEXT_NODE。内容脚本里直接写 3，省一层全局查找 */
+  const TEXT_NODE = 3;
+
   /** 轨道采样的心跳间隔（正常由 MutationObserver 驱动，心跳只作兜底） */
   const HEARTBEAT_MS = 1000;
   /** 落盘去抖：字幕可能一秒变好几条，不必每条都写 storage */
@@ -75,8 +78,15 @@
   const SKELETON_INDEX_KEY = 'subtitle-cache:index';
   /** 原文档位的后缀 */
   const SKELETON_SLOT = ':primary';
-  /** 每个视频最多试几次列索引（缓存可能晚于页面出现，但也不能无限轮询） */
-  const SKELETON_MAX_TRIES = 4;
+  /**
+   * 每个视频最多试几次列索引。
+   *
+   * 由心跳（1s 一次）驱动，所以这个数约等于「等官方写缓存的时间窗口」= 60 秒。
+   * 为什么不用时间窗口 / 时间节流：逐词高亮会频繁驱动 capture()，按「次数」计数时
+   * 必须保证尝试由心跳驱动而不是 capture 驱动（见 heartbeat 与 capture 的调用点）；
+   * 而时间节流会让 Node 侧的冒烟测试无法确定性推进（真实 Date.now 走得比测试慢）。
+   */
+  const SKELETON_MAX_TRIES = 60;
   /** 直播句找不到对应骨架句时的匹配容差（秒） */
   const SKELETON_TOLERANCE_SECONDS = 1.8;
   /** 连续这么多句都匹配不上，就认为骨架选错了（另一种学习语言），换下一个候选 */
@@ -181,6 +191,82 @@
     };
   }
 
+  /**
+   * 取一棵子树里的文本。
+   *
+   * `only === 'RT'` → 只要 rt 里的（注音）；`only` 为空 → 排除 rt（与 plainText() 同口径）。
+   * 官方自己做的事也是这两件（`Tn()` 删掉 rt，`ruby()` 把注音放进 rt）。
+   */
+  function subtreeText(node, only) {
+    let text = '';
+    for (const child of node.childNodes || []) {
+      if (child.nodeType === TEXT_NODE) {
+        if (!only) text += child.data || '';
+        continue;
+      }
+      if (child.nodeName === 'RT') {
+        if (only === 'RT') text += child.textContent || '';
+        continue;
+      }
+      text += subtreeText(child, only);
+    }
+    return text;
+  }
+
+  /**
+   * 把一行拆成片段：普通文本一段，`<ruby>夜<rt>よる</rt></ruby>` 收成「夜 + 注音よる」一段。
+   * 与 plainText() 同一口径 —— 所有片段的 text 拼起来就是剥掉 rt 的纯文本。
+   */
+  function collectTokens(node, out) {
+    for (const child of node.childNodes || []) {
+      if (child.nodeType === TEXT_NODE) {
+        if (child.data) out.push({ text: child.data, ruby: '' });
+        continue;
+      }
+      if (child.nodeName === 'RT') continue;
+      if (child.nodeName === 'RUBY') {
+        const text = subtreeText(child, null);
+        if (text) out.push({ text, ruby: subtreeText(child, 'RT') });
+        continue;
+      }
+      collectTokens(child, out);
+    }
+  }
+
+  /**
+   * 当前原文行的「带注音结构」（**只给浮窗用**），不改变任何既有口径。
+   *
+   * 为什么要单独开一个接口：readLines() 给的是**剥掉 rt 的纯文本**（浮窗原文行、面板
+   * 逐句列表、导出的 Markdown / SRT 都用它）—— 那是 PLAN 010 定下的口径，不能动。
+   * 而浮窗想要「和官方这行长一个样」，就需要 rt。所以这里额外提供一份结构；官方这行
+   * 没有 rt 时返回 null，调用方走原来的纯文本路径，行为一个字不变。
+   *
+   * 返回 null 的三种情况：
+   *   · 没有字幕，或字幕整体隐藏；
+   *   · 官方这行没有 rt（`readingMode` 关着，或这门语言没有注音）—— 跟随官方；
+   *   · 片段拼出来的原文与归一化后的纯文本不一致（行里有额外空白 / 换行）：
+   *     这时不敢把字符往某个注音上对，宁可退回纯文本。
+   */
+  function readPrimaryRich() {
+    const host = document.getElementById(HOST_ID);
+    const root = host && host.shadowRoot;
+    if (!root) return null;
+
+    const group = root.querySelector('.subtitle-group');
+    if (!group || group.style.display === 'none') return null;
+
+    const el = root.querySelector('.subtitle.subtitle-primary');
+    if (!el || el.style.display === 'none') return null;
+    if (!el.querySelector('rt')) return null;
+
+    const tokens = [];
+    collectTokens(el, tokens);
+    const raw = tokens.map((token) => token.text).join('');
+    const text = normalizeText(raw);
+    if (!text || raw !== text) return null;
+    return { text, tokens };
+  }
+
   function readMeta() {
     const url = new URL(location.href);
     const id = url.searchParams.get('v') || '';
@@ -215,19 +301,55 @@
     return (text || '').replace(/\s+/g, ' ').trim();
   }
 
-  /** 列出这个视频的原文档位候选，按 cachedAt 降序（最新的那份最可能是当前用的） */
-  async function listSkeletonKeys(videoId) {
+  /**
+   * 列 storage 里的所有 key。
+   *
+   * 只在「官方索引没给出这个视频的骨架」时走这条路：实测（本机 chrome.storage.local，
+   * 2026-10-16）官方索引里只有 13 条，而 storage 里躺着 20 多条 `subtitle-cache:v6:*` 的
+   * **值** —— 索引有条数上限与 TTL，被挤掉的是索引条目，值还在。只要拿到 key 就能读值，
+   * 所以索引里没有不该成为放弃的理由。
+   *
+   * `getKeys()` 是 Chrome 130+ 的 API，只回 key、不搬值，代价最小；老版本退回 `get(null)`
+   * （把整份 storage 搬进内存，几 MB —— 所以调用方要限次，见 listSkeletonKeys）。
+   */
+  async function listStoredKeys() {
+    const local = chrome.storage.local;
+    if (typeof local.getKeys === 'function') {
+      return (await local.getKeys()) || [];
+    }
+    const all = await local.get(null);
+    return all ? Object.keys(all) : [];
+  }
+
+  /**
+   * 列出这个视频的原文档位候选，按 cachedAt 降序（最新的那份最可能是当前用的）。
+   *
+   * 先读官方索引：便宜，而且带 cachedAt（能排序、能挑最新那一份）。索引里没有本视频的条目
+   * 就退化为枚举 storage 的 key（见 listStoredKeys）—— 这条路拿不到 cachedAt，就保持 storage
+   * 给的顺序，让 maybeLoadSkeleton 逐个试（选错了靠 liveMisses 的失配检测换下一份）。
+   *
+   * `tries` 是已经试过的次数，用来限制枚举的频率：枚举比读索引贵（`get(null)` 时尤其），
+   * 而官方写缓存是秒级的事，所以前 5 次每秒翻一遍、之后每 10 秒一遍就够
+   * （最多 11 次，不会变成「每次心跳把 storage 全搬一遍」）。
+   */
+  async function listSkeletonKeys(videoId, tries = 1) {
+    if (!videoId) return [];
+    const prefix = `${SKELETON_PREFIX}${videoId}:`;
+    const isCandidate = (key) => typeof key === 'string'
+      && key.startsWith(prefix)
+      && key.endsWith(SKELETON_SLOT);
+
     const stored = await chrome.storage.local.get(SKELETON_INDEX_KEY);
     const index = stored && stored[SKELETON_INDEX_KEY];
     const entries = index && Array.isArray(index.entries) ? index.entries : [];
-    const prefix = `${SKELETON_PREFIX}${videoId}:`;
-
-    return entries
-      .filter((entry) => entry && typeof entry.key === 'string'
-        && entry.key.startsWith(prefix)
-        && entry.key.endsWith(SKELETON_SLOT))
+    const indexed = entries
+      .filter((entry) => entry && isCandidate(entry.key))
       .sort((a, b) => (b.cachedAt || 0) - (a.cachedAt || 0))
       .map((entry) => entry.key);
+    if (indexed.length) return indexed;
+
+    if (tries > 5 && tries % 10 !== 0) return [];
+    return (await listStoredKeys()).filter(isCandidate);
   }
 
   /** 官方 cue → 轨道 cue：只取原文与时间，译文等采样来填 */
@@ -351,11 +473,16 @@
     try {
       if (!skeleton.keys) {
         skeleton.tries += 1;
-        skeleton.keys = await listSkeletonKeys(videoId);
-        if (!skeleton.keys.length) {
+        const keys = await listSkeletonKeys(videoId, skeleton.tries);
+        if (!keys.length) {
+          // ⚠️ 空结果**不能**落账（PLAN 014 的根因）：[] 是 truthy，写进 skeleton.keys 之后
+          // 下一次调用就会以为「索引已经列过了」而跳过重列，直接 done —— 从此永远读不到骨架，
+          // 面板就只剩「播放过的句子」。官方写缓存晚于我们打开面板是常态（索引里还留着
+          // 别的视频的条目、只是还没有当前 videoId 的），这里只累加次数，等下一次心跳再试。
           if (skeleton.tries >= SKELETON_MAX_TRIES) skeleton.done = true;
           return;
         }
+        skeleton.keys = keys;
       }
 
       while (skeleton.next < skeleton.keys.length) {
@@ -506,11 +633,9 @@
     lastKey = key;
 
     closeActive();
-    if (lines && (lines.primary || lines.secondary)) {
-      openCue(lines);
-      // 官方写缓存可能晚于页面打开，所以看到字幕就顺手再试一次（限次，见 maybeLoadSkeleton）
-      maybeLoadSkeleton().catch(() => {});
-    }
+    // 骨架的重试不挂在这里：逐词高亮会让 capture 一秒触发好几次，次数会被刷爆
+    // （见 heartbeat 的调用点）
+    if (lines && (lines.primary || lines.secondary)) openCue(lines);
     notify();
   }
 
@@ -548,6 +673,9 @@
     }
     bindObserver();
     capture();
+    // 骨架重试挂在心跳上：1s 一次、最多 SKELETON_MAX_TRIES 次（≈1 分钟）。
+    // 官方写缓存晚于我们打开面板是常态，所以必须留出这个窗口（见 PLAN 014 的第 1 条）。
+    maybeLoadSkeleton().catch(() => {});
   }
 
   // ---------------------------------------------------------------- 持久化
@@ -811,6 +939,7 @@
     getMeta: () => (meta ? { ...meta } : null),
     getVideoTime: currentTime,
     readLines,
+    readPrimaryRich,
     snapshot,
     clear,
     flush,

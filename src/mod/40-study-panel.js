@@ -225,7 +225,26 @@
 }
 .icon:hover { background: var(--llg-row-hover); color: var(--llg-text-primary); }
 
-.stage { padding: 14px 16px 16px; border-bottom: 1px solid var(--llg-divider); min-height: 104px; }
+/* 「回到当前句」：悬浮在列表右下角的胶囊，只有跟随被关掉（用户滚到别处了）时才出现。
+   为什么从 .head 挪到这里：① 列形态下面板跟着 YouTube 的列走、只有几百像素宽，
+   挤在标题旁边不显眼；② 拖滚动条不会触发 wheel（PLAN 013 登记的已知边界），
+   按钮的显隐改由「当前行是否在列表可视区内」兜底，见 list 的 scroll 监听。 */
+.list-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.follow {
+  position: absolute; right: 12px; bottom: 12px; z-index: 1;
+  padding: 6px 12px; border: none; border-radius: 999px;
+  background: var(--llg-button-secondary); color: var(--llg-text-primary);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .32);
+  font: inherit; font-size: 12.5px; line-height: 1.3; white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--llg-duration-fast) var(--llg-ease-out);
+}
+.follow:hover { background: var(--llg-button-secondary-hover); }
+.follow[data-state="off"] { display: none; }
+
+/* 当前句块（大字号双语）排在列表**之后**、紧贴页脚：位置与视频原生字幕一样低，
+   眼睛不必在「画面底部」与「面板顶部」之间来回跳（见 PLAN 014 的第 3 条）。 */
+.stage { padding: 14px 16px 16px; border-top: 1px solid var(--llg-divider); min-height: 104px; }
 .kline { position: relative; overflow: hidden; border-radius: var(--llg-radius-sm);
   padding: 8px 12px; margin-bottom: 8px; }
 .kline:last-child { margin-bottom: 0; }
@@ -333,6 +352,11 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     </div>
     <button class="icon" type="button" data-act="close" aria-label="关闭">×</button>
   </header>
+  <div class="list-wrap">
+    <ol class="list" data-role="list"></ol>
+    <button class="follow" type="button" data-role="follow" data-act="follow"
+      data-state="off" title="滚动到正在播放的那一句">回到当前句</button>
+  </div>
   <section class="stage">
     <div class="kline kline-ja">
       <i class="kfill" data-role="fill"></i>
@@ -343,7 +367,6 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
       <span class="ktext" data-role="zh"></span>
     </div>
   </section>
-  <ol class="list" data-role="list"></ol>
   <footer class="foot">
     <button type="button" data-act="md">导出 Markdown</button>
     <button type="button" data-act="srt">SRT</button>
@@ -438,13 +461,23 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     holder.innerHTML = PANEL_HTML;
     shadow.append(holder.firstElementChild);
 
-    for (const role of ['panel', 'resize', 'title', 'sub', 'fill', 'fill2', 'ja', 'zh', 'list', 'toast']) {
+    for (const role of ['panel', 'resize', 'title', 'sub', 'follow', 'fill', 'fill2', 'ja', 'zh', 'list', 'toast']) {
       els[role] = shadow.querySelector(`[data-role="${role}"]`);
     }
+    syncFollowButton();
 
     // 宽度不在这里写死：列形态下它由 YouTube 的列给（见 applyPanelWidth）
+    // 滚轮一滚就停止跟随（否则用户看不了别的句子），「回到当前句」负责把他带回来
     els.list.addEventListener('wheel', () => {
-      follow = false;
+      setFollow(false);
+    }, { passive: true });
+
+    // 拖滚动条 / 触控板边缘滚动只发 scroll 不发 wheel（PLAN 013 登记的已知边界）。
+    // 这里兜底：滚完之后当前行不在可视区内，就一样停止跟随，让「回到当前句」浮出来。
+    // 不能无条件 setFollow(false) —— 跟随中的程序化滚动（highlight → scrollIntoView）
+    // 也会发 scroll，而那时当前行是可见的，判据天然把它排除掉。
+    els.list.addEventListener('scroll', () => {
+      if (follow && !activeRowVisible()) setFollow(false);
     }, { passive: true });
 
     shadow.addEventListener('click', (ev) => {
@@ -452,6 +485,7 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
       if (!btn) return;
       const act = btn.dataset.act;
       if (act === 'close') setOpen(false);
+      else if (act === 'follow') onFollow();
       else if (act === 'clear') onClear();
       else if (act) onExport(act);
     });
@@ -750,7 +784,8 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     li.addEventListener('click', () => {
       const el = video();
       if (el && Number.isFinite(cue.start)) el.currentTime = cue.start;
-      follow = true;
+      // 点了某一句就跟着它走（用户手动挑了目标，跟随自然恢复）
+      setFollow(true);
     });
     return li;
   }
@@ -842,8 +877,68 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     highlight(cur ? cur.index : -1);
   }
 
-  function highlight(index) {
-    if (index === activeIndex) return;
+  /**
+   * 当前句那一行是否完整落在列表的可视区内。
+   *
+   * 用 getBoundingClientRect 而不是 offsetTop：真 DOM 里 list 的 offsetParent 不一定是
+   * 它自己（可能是 .panel），拿 offsetTop 比会算错。
+   * 桩件（Node 冒烟测试）没有这个方法时返回 true —— 宁可不动跟随，也不要误关。
+   */
+  function activeRowVisible() {
+    if (activeIndex < 0) return true;
+    const row = els.list.children[activeIndex];
+    if (!row) return true;
+    const list = els.list;
+    if (typeof list.getBoundingClientRect !== 'function'
+      || typeof row.getBoundingClientRect !== 'function') return true;
+
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    // 容差 2px：贴着边缘那一行仍然算「看得见」，否则会在边界上反复开关
+    return rowRect.top >= listRect.top - 2 && rowRect.bottom <= listRect.bottom + 2;
+  }
+
+  /**
+   * 跟随开关。
+   *
+   * 关：滚轮、滚动条（当前行滚出可视区）。开：点某一句、点「回到当前句」。
+   * 按钮状态跟着它走（先比对再写，见 AGENTS.md §3 的幂等规矩）。
+   */
+  function setFollow(value) {
+    if (follow === value) return;
+    follow = value;
+    syncFollowButton();
+  }
+
+  function syncFollowButton() {
+    // 只看按钮在不在，不看 built —— buildPanel 是在 built 置位**之前**调它的
+    if (!els.follow) return;
+    const next = follow ? 'off' : 'on';
+    if (els.follow.dataset.state !== next) els.follow.dataset.state = next;
+  }
+
+  /**
+   * 回到正在播放的那一句。
+   *
+   * 用户实测反馈：「整条字幕都展示了，但滚动之后很难定位到正在播放的位置」。
+   * 滚轮一滚跟随就关了（不然看不了别的句子），而恢复跟随原先只有「点某一行」这一条路 ——
+   * 那恰恰要求用户先自己找到当前句。这里给一个直达入口：滚过去 + 恢复跟随。
+   */
+  function onFollow() {
+    setFollow(true);
+
+    const cur = track.getCurrent();
+    if (!cur) {
+      toast('还没有正在播放的句子');
+      return;
+    }
+    // 强制重画一次高亮：index 与 activeIndex 相同的话 highlight 会提前返回，就不会滚动
+    activeIndex = -1;
+    highlight(cur.index, { center: true });
+  }
+
+  function highlight(index, { center = false } = {}) {
+    if (index === activeIndex && !center) return;
 
     const prev = els.list.querySelector('.row.is-active');
     if (prev) prev.classList.remove('is-active');
@@ -854,7 +949,9 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     const row = els.list.children[index];
     if (!row) return;
     row.classList.add('is-active');
-    if (follow) row.scrollIntoView({ block: 'nearest' });
+    // 通常跟随时用 nearest（不打断阅读）；用户按「回到当前句」是要「看清楚在哪」，
+    // 那一下把它居中。
+    if (center || follow) row.scrollIntoView({ block: center ? 'center' : 'nearest' });
   }
 
   // ---------------------------------------------------------------- 导出

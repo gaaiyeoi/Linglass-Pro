@@ -16,26 +16,51 @@
  *
  * ── 常驻语义（本文件最容易被改坏的部分，先读这段）──
  *
- * 期望：默认开启、切回浏览器之后依然在、只有显式关闭才关。
+ * 期望：**默认开启，而且只有我们自己的按钮/开关能关掉它。**
  *
- * 但「关」这件事不归我们管：规范允许 UA 自行关闭 PiP 窗口
+ * 但「窗口消失」这件事不归我们管：规范允许 UA 自行关闭 PiP 窗口
  * （Document PiP §5 步骤 9 / §6.4），opener 文档被销毁或导航时更是强制关闭
- * （§6.6 / §6.7）—— 刷新页面、真导航换视频、扩展重载都落在这一档。
- * 而 §6.10 那句 "Giving system focus to the opener does not necessarily need to close
- * the document picture-in-picture window" 里的 "not necessarily" 就是留给实现的裁量权。
+ * （§6.6 / §6.7）—— 用户点窗口自己的 X、切到别的应用、刷新页面、真导航换视频、
+ * 扩展重载，都会让窗口消失。
  *
- * 所以我们不去阻止关闭（阻止不了），而是把「被关掉」从终态改成中间态：
+ * 所以我们不去阻止关闭（阻止不了），而是把「窗口消失」一律当成**中间态**：
  *
- *   enabled（落盘，默认 true）= 用户希望它开着
- *   pagehide 时判「谁关的」：
- *     · 我们自己的 close()  → 显式
- *     · 页面 hidden，或刚从 hidden 回到 visible（RECENT_VISIBLE_MS 内）→ 判定为
- *       「切回浏览器时被 UA 关掉」→ 立刻重开
- *     · 其余（用户在 PiP 窗口上点了 X）→ 显式
+ *   enabled（落盘，默认 true）= 用户希望它开着。**写入口只有两处**：
+ *   open() 写 true，close() 写 false（close 只由控制栏按钮 / 设置面板开关触发）。
  *
- * 「立刻重开」不一定成功：requestWindow() 必须在瞬时用户激活内调用。
- * 所以恢复是两段的 —— 先试一次，失败就 arm() 一个一次性手势监听，
- * 用户下一次点击/按键时打开（默认开启就是靠这条路径生效的）。
+ *   pagehide 时：只要不是我们自己的 close()（closingByUs），且 enabled 还是 true，
+ *   就立刻想办法把窗口弄回来 —— 于是**只有按钮/开关能真正关掉它**。
+ *
+ *   为什么不区分「谁关的」：用户点 X 与文档卸载（刷新 / 导航）在 pagehide 里
+ *   **区分不了**（刷新时 document.visibilityState 仍是 'visible'）。早期版本按
+ *   「疑似点 X 就当用户不要了」处理并落盘 enabled = false，结果是**每次刷新都会把
+ *   「默认开启」关掉**，只能再手点按钮才能回来。既然关闭权只归按钮，这个区分就没有
+ *   存在的意义了（对应地，isInvoluntaryClose()/lastVisibleAt 那一套也一并删掉）。
+ *
+ * 「立刻弄回来」不一定成功：requestWindow() 必须在瞬时用户激活内调用。
+ * 所以恢复是「**有激活才试**」：
+ *   有激活（用户正点着页面）→ 试一次；被拒就 arm() 一个一次性手势监听
+ *   没激活（刷新 / 真导航 / 系统悄悄收走窗口）→ **连试都不试**，直接 arm()
+ * 用户下一次点击/按键时打开（默认开启就是靠这条路径生效的）。没激活还去调
+ * requestWindow() 只会换来一条 'Document PiP requires user activation' 的红字，
+ * 让用户以为功能坏了 —— 见 open() 里的 hasActivation()。
+ *
+ * **关窗这件事不归我们**：切回浏览器本体（把系统焦点/可见性还给 opener）时，UA 会把
+ * 窗口收走。规范只把它列为裁量（§5 步骤 9 的 "Optionally, the user agent can close
+ * any existing picture-in-picture windows."、§6.10 的 "…does not necessarily need to
+ * close…"），而 `disallowReturnToOpener: true` 只是「不显示那个返回标签页的按钮」的
+ * **hint**（MDN / Chrome 文档口径一致，且只在 Chrome 124+ 存在），拦不住它。
+ * 代码里能关掉窗口的只有 close()（我们自己的 UI）与 cleanupOrphan()（内容脚本重新
+ * 注入时清残留）——「回到浏览器」这条路径上没有任何一处会关它，也不该去试。
+ *
+ * 于是「回到浏览器」的那些时机（visibilitychange / window focus，见 wake()）做两件事：
+ *   先把本地状态跟浏览器对齐（syncWindow()：窗口其实已经被收走时清干净，且不写 enabled），
+ *   再尽量试一次开窗 —— 用户若是「点着页面回来」的，那一下带着瞬时激活，浮窗当场就回来；
+ *   否则照旧 arm()，等下一次手势。
+ *
+ * arm() 的手势监听**跳过落在我们自己的按钮/开关上的手势**（见 onOurOwnUi()）：
+ * 那些点击有自己的 click 处理器（控制栏按钮的 onClick、设置面板开关的 toggle），
+ * 在 pointerdown 阶段预开会和它抢同一次点击 —— 先开、紧接着被 close() 关掉。
  *
  * 进度更新的双保险：
  *   1. pipWin.requestAnimationFrame —— PiP 窗口可见时由它自己的合成器驱动，
@@ -53,6 +78,11 @@
   }
 
   const BTN_ID = 'llg-pip-btn';
+  /**
+   * 设置面板里我们自己那些开关按钮（50-settings-panel.js 打的标记）。
+   * 只读依赖：用来认出「这次手势是要开/关浮窗」，而不是「用户顺手点了下页面」。
+   */
+  const TOGGLE_SELECTOR = '[data-llg-toggle]';
   const LABEL_IDLE = '桌面字幕';
   const LABEL_ON = '关闭桌面字幕';
   const LABEL_UNSUPPORTED = '当前浏览器不支持桌面字幕';
@@ -77,14 +107,6 @@
 
   /** 常驻开关的落盘键。默认 true —— 用户没表过态时就是要开着 */
   const STORE_KEY = 'llgPip';
-
-  /**
-   * 「刚从后台切回来」的判定窗口。
-   * UA 关闭 PiP 的时机就是我们切回浏览器那一刻，给 4s 余量足够覆盖系统调度抖动；
-   * 再长的窗口会把「用户盯着 PiP 点它的 X」误判成切回（那时页面是 visible 且
-   * lastVisibleAt 早已过期）。
-   */
-  const RECENT_VISIBLE_MS = 4000;
 
   /** 触发「下一次手势就开」的事件。pointerdown 覆盖鼠标/触摸，keydown 覆盖键盘用户 */
   const GESTURE_EVENTS = ['pointerdown', 'keydown'];
@@ -424,6 +446,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   letter-spacing: ${letterSpacing}; color: ${secondaryColor};
   text-shadow: ${edge.shadow}; -webkit-text-stroke-width: ${edge.stroke};
   -webkit-text-stroke-color: rgba(0, 0, 0, 0.92); paint-order: ${edge.paintOrder}; }
+/* 振假名：只有官方这行本来就渲染了 <rt> 时才会出现（跟随官方，见 pushText 的 richTokens）。
+   比原文小一号、稍淡，不吃原文的字距；有注音时行距要抬高，否则上标会贴住上一行 */
+#line-primary:has(ruby) { line-height: 1.7; }
+#line-primary rt { font-size: .5em; font-weight: 400; letter-spacing: 0; opacity: .72; }
 /* 分隔符：与 15-ja-break.js 视频内那套（那边是 ::after）同一份观感 */
 .${SEP_CLASS} { margin: 0 .14em; opacity: .42; font-weight: 400; }
 `].join('\n');
@@ -508,16 +534,6 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let opening = false;
   /** 包住我们主动调用的 close()，用来把「我们关的」和「别人关的」分开 */
   let closingByUs = false;
-  /**
-   * 上一次「从后台切回来」的时刻（0 = 本次加载后还没切出去过）。
-   *
-   * 只在真正发生 hidden → visible 的跃迁时刷新，而不是把「visible」当条件 ——
-   * 否则刚打开页面的那几秒里，用户点 PiP 的 X 会被误判成「切回浏览器导致的关闭」，
-   * 于是窗口被强行弹回来。
-   */
-  let lastVisibleAt = 0;
-  /** 页面当前是不是处于后台（用来识别 hidden → visible 的跃迁） */
-  let pageHidden = document.visibilityState === 'hidden';
   /** 已经挂上 play/pause/ratechange 的那个 video（换视频时要换手） */
   let boundVideo = null;
 
@@ -527,6 +543,43 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
   function warn(msg) {
     console.warn(`[桌面字幕] ${msg}`);
+  }
+
+  // ------------------------------------------------- 本地状态 vs 浏览器里的真实窗口
+  //
+  // 背景（详见文件头「常驻语义」）：窗口消失不归我们管，而且 `pipWin` 只在 pagehide
+  // 与心跳（最多晚 1s）里才会被清空。这段空窗期里，**读 `pipWin` 的代码会做出与事实
+  // 相反的判断** —— 按钮以为「还开着」于是走了 close()（把常驻开关写成 false）、
+  // arm() 以为「不必武装」于是下一次手势没人接、canAutoOpen() 以为「已经有窗口」
+  // 于是把用户那一下带激活的点击白白浪费掉。这两个函数就是用来消掉这段空窗期的。
+
+  /**
+   * 浏览器里**此刻真有**的那扇浮窗；没有就是 null。
+   *
+   * 两个判据都要看：
+   *   · `pipWin.closed` —— 窗口自己知道它被关了（同步、最直接）；
+   *   · `documentPictureInPicture.window` —— 浏览器那边一个窗口都没有了。
+   *
+   * **刻意不比 WindowProxy 身份**：身份一旦不成立就会去 requestWindow()，而
+   * requestWindow() 会顺手把同一个文档里还开着的那扇窗关掉（规范 §6.5 / requestWindow
+   * 步骤 8）—— 那是「我们自己发指令关窗」唯一的一条路，不能靠一个包装对象身份去碰运气。
+   */
+  function liveWindow() {
+    if (!pipWin) return null;
+    if (pipWin.closed) return null;
+    if (supported() && !documentPictureInPicture.window) return null;
+    return pipWin;
+  }
+
+  /**
+   * 把本地状态跟浏览器对齐：窗口已经不在时清干净（stop()），返回「此刻是否真有窗口」。
+   *
+   * ⚠️ 校准**只清状态，绝不写 enabled** ——「谁关的」（用户点 X / 浏览器收走 /
+   * 文档卸载）在这里同样分不清，写下去就会把「默认开启」搞丢（见 save() 的注释）。
+   */
+  function syncWindow() {
+    if (pipWin && !liveWindow()) stop();
+    return !!pipWin;
   }
 
   // ---------------------------------------------------------------- 文案渲染
@@ -548,17 +601,31 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
    *
    * 尊重视频内断句的开关：关着、或 15-ja-break.js 没加载（扩展被裁剪过）时只有一段。
    */
-  function primaryParts(text) {
-    const plain = [{ text: text || '', sep: false }];
+  /** 分隔符长什么样（与 15-ja-break.js 的 ::after content 同一份来源） */
+  function separatorText() {
+    const jaBreak = globalThis.__llgModJaBreak;
+    return (jaBreak && jaBreak.SEPARATOR) || '|';
+  }
+
+  /**
+   * 当前这一行的文节切点（纯文本偏移，严格升序，最后一点落在文本末尾）。
+   * 断句开关关着、或 15-ja-break.js 没加载（扩展被裁剪过）时返回空数组。
+   */
+  function cuePoints(text) {
     const jaBreak = globalThis.__llgModJaBreak;
     const segment = globalThis.__llgModJaSegment;
     if (!text || !jaBreak || typeof jaBreak.isEnabled !== 'function' || !jaBreak.isEnabled()) {
-      return plain;
+      return [];
     }
-    if (!segment || typeof segment.cut !== 'function') return plain;
-
+    if (!segment || typeof segment.cut !== 'function') return [];
     const points = segment.cut(text);
-    if (!points || !points.length) return plain;
+    return points && points.length ? points : [];
+  }
+
+  function primaryParts(text) {
+    const plain = [{ text: text || '', sep: false }];
+    const points = cuePoints(text);
+    if (!points.length) return plain;
 
     // cut() 的切点严格升序、且最后一点落在文本末尾，所以这样切不会丢尾巴
     const words = [];
@@ -573,10 +640,70 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     // 间距交给 .llg-sep 的 margin（与原生一致），这里不往文本里塞空格
     const parts = [];
     for (const word of words) {
-      if (parts.length) parts.push({ text: (jaBreak.SEPARATOR || '|'), sep: true });
+      if (parts.length) parts.push({ text: separatorText(), sep: true });
       parts.push({ text: word, sep: false });
     }
     return parts;
+  }
+
+  /**
+   * 当前原文行的「带注音结构」。跟随官方：官方这行渲染了 `<ruby>/<rt>` 才有值。
+   *
+   * 只有当它的纯文本与轨道读到的原文**完全一致**时才敢用 —— 两者口径本就同源
+   * （都剥掉 rt），一旦对不上（行里有别的空白形态）就退回纯文本，不猜字符归属。
+   */
+  function richTokens(text) {
+    if (!track || typeof track.readPrimaryRich !== 'function') return null;
+    const rich = track.readPrimaryRich();
+    if (!rich || !Array.isArray(rich.tokens) || !rich.tokens.length) return null;
+    if (rich.text !== text) return null;
+    return rich.tokens;
+  }
+
+  /**
+   * 带注音的片段 → 段落（每段是一串 token，段与段之间放分隔符）。
+   *
+   * 与 primaryParts() 共用同一份文节切点。**切点落在带注音的片段内部时放弃这个切点**：
+   * 注音挂在汉字上，把汉字切成两半没法表达（分隔符只是视觉提示，少一个总比给出错的
+   * 注音好）。
+   */
+  function richSegments(tokens, points) {
+    const segments = [];
+    let seg = [];
+    let acc = 0;
+    let pi = 0;
+
+    for (const token of tokens) {
+      let rest = token;
+
+      // 切点落在片段内部：没注音的可以切开，带注音的放弃这个切点
+      while (pi < points.length && points[pi] > acc && points[pi] < acc + rest.text.length) {
+        if (rest.ruby) {
+          pi += 1;
+          continue;
+        }
+        const offset = points[pi] - acc;
+        seg.push({ text: rest.text.slice(0, offset), ruby: '' });
+        segments.push(seg);
+        seg = [];
+        rest = { text: rest.text.slice(offset), ruby: '' };
+        acc = points[pi];
+        pi += 1;
+      }
+
+      seg.push(rest);
+      acc += rest.text.length;
+
+      // 切点正好落在片段末尾：在这里断开
+      if (pi < points.length && points[pi] === acc) {
+        segments.push(seg);
+        seg = [];
+        pi += 1;
+      }
+    }
+
+    if (seg.length) segments.push(seg);
+    return segments;
   }
 
   /**
@@ -590,6 +717,24 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       .join('');
   }
 
+  /** 分隔符节点（与视频内那套同一份观感，样式见 pipCss 的 .llg-sep） */
+  function makeSeparator(d) {
+    const span = d.createElement('span');
+    span.className = SEP_CLASS;
+    span.textContent = separatorText();
+    return span;
+  }
+
+  /** 带注音的 token → `<ruby>汉字<rt>かな</rt></ruby>`（官方 ruby() 的同款结构） */
+  function makeRuby(d, token) {
+    const ruby = d.createElement('ruby');
+    ruby.append(d.createTextNode(token.text));
+    const rt = d.createElement('rt');
+    rt.textContent = token.ruby;
+    ruby.append(rt);
+    return ruby;
+  }
+
   /** 片段 → 子节点。空片段不渲染，否则 #line-primary 不再是 :empty，占位文案就出不来了 */
   function renderSegments(line, parts) {
     if (!line) return;
@@ -597,11 +742,29 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     const nodes = [];
     for (const part of parts) {
       if (!part.text) continue;
+      if (part.sep) {
+        nodes.push(makeSeparator(d));
+        continue;
+      }
       const span = d.createElement('span');
-      if (part.sep) span.className = SEP_CLASS;
       span.textContent = part.text;
       nodes.push(span);
     }
+    line.replaceChildren(...nodes);
+  }
+
+  /** 富片段 → 子节点（`<ruby>` 或纯文本），段与段之间插分隔符 */
+  function renderRichSegments(line, segments) {
+    if (!line) return;
+    const d = pipWin.document;
+    const nodes = [];
+    segments.forEach((seg, index) => {
+      if (index) nodes.push(makeSeparator(d));
+      for (const token of seg) {
+        if (!token.text) continue;
+        nodes.push(token.ruby ? makeRuby(d, token) : d.createTextNode(token.text));
+      }
+    });
     line.replaceChildren(...nodes);
   }
 
@@ -609,16 +772,22 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     if (!pipWin) return;
 
     const lines = currentLines();
-    const parts = primaryParts(lines.primary);
+    // 官方这行带注音（有 <rt>）就走富渲染，否则维持纯文本 + 分隔符 —— 跟随官方
+    const tokens = richTokens(lines.primary);
+    const parts = tokens ? null : primaryParts(lines.primary);
     // 双语关掉时官方也不显示译文行 —— 浮窗跟着它，别自作主张多给一行
     const secondary = appearance.dual ? lines.secondary : '';
-    // 分隔符开关 + 双语开关的状态进键：用户中途改设置/改断句时浮窗要重绘
-    const key = `${parts.map((part) => part.text).join('\u0001')}\u0000${secondary}`;
+    // 注音形态 / 分隔符开关 / 双语开关都进键：用户中途改设置时浮窗要重绘
+    const key = tokens
+      ? `r\u0001${tokens.map((token) => `${token.text}\u0002${token.ruby || ''}`).join('\u0001')}\u0000${secondary}`
+      : `${parts.map((part) => part.text).join('\u0001')}\u0000${secondary}`;
     if (key === lastKey) return;
     lastKey = key;
 
     const d = pipWin.document;
-    renderSegments(d.getElementById('line-primary'), parts);
+    const line = d.getElementById('line-primary');
+    if (tokens) renderRichSegments(line, richSegments(tokens, cuePoints(lines.primary)));
+    else renderSegments(line, parts);
     setText(d.getElementById('line-secondary'), secondary);
   }
 
@@ -800,6 +969,14 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
   // ---------------------------------------------------------------- 常驻开关
 
+  /**
+   * 落盘常驻开关。
+   *
+   * ⚠️ `enabled` 的写入口**只有两个**：`open()`（写 true）与 `close()`（写 false）。
+   * **不要在 PiP 窗口的 pagehide 里写盘** —— 那里分不清「用户点了 X」与「文档卸载
+   * （刷新 / 导航）」，写下去就会把默认开启搞丢（用户报的正是这个，见文件头与
+   * handlePageHide 的注释）。
+   */
   function save() {
     try {
       chrome.storage.local.set({ [STORE_KEY]: { enabled } }).catch(() => {});
@@ -808,11 +985,29 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     }
   }
 
-  /** 现在这个时机自动开窗有没有意义（watch 页 + 有视频） */
+  /**
+   * 播放页里的那个 video。
+   *
+   * 刻意**不带** video() 那个 `document.querySelector('video')` 兜底：首页的缩略图
+   * 预览也是 `<video>`，用兜底会在首页把浮窗弹出来。`#movie_player` 只存在于播放页
+   * （/watch、/live/…），它才是「这是个播放页」的判据。
+   */
+  function playerVideo() {
+    return document.querySelector('#movie_player video');
+  }
+
+  /**
+   * 现在这个时机自动开窗有没有意义（播放页 + 有视频）。
+   *
+   * 判据里**不再有 location.pathname**：从首页 / 搜索页点视频封面时，pointerdown 发生在
+   * SPA 导航完成之前，那一刻 pathname 还是 `'/'` —— 拿它当条件会把用户第一次手势
+   * 白白丢掉（而且 arm() 的回调会先 disarm()，那一次点击就彻底没了）。
+   */
   function canAutoOpen() {
-    if (!supported() || !enabled || pipWin) return false;
-    if (location.pathname !== '/watch') return false;
-    return !!document.querySelector('#movie_player video');
+    // syncWindow() 而不是 `pipWin`：浏览器刚把窗口收走时 `pipWin` 还是旧的，
+    // 用它会判「已经有窗口了」，于是用户「回来点一下」那一下带激活的手势被白白浪费
+    if (!supported() || !enabled || syncWindow()) return false;
+    return !!playerVideo();
   }
 
   function disarm() {
@@ -822,21 +1017,80 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   }
 
   /**
+   * 这次手势是不是落在**我们自己的**按钮 / 开关上。
+   *
+   * 是的话，开/关这件事归那个按钮自己的 click 处理器（控制栏按钮的 onClick、
+   * 设置面板开关的 toggle）：arm() 若在 pointerdown 阶段抢先 open()，随后到达的
+   * click 会看到「已经开着」，于是把它关掉 —— 用户看到的是「点了打不开」，而且
+   * close() 会把 enabled 落盘成 false，把「默认开启」一起搞丢。
+   *
+   * 判据用 composedPath() 而不是 target：设置面板的开关在 Linglass 的 shadowRoot
+   * 里，事件冒到 document 时 target 已被重定向成宿主元素，只有 composedPath()
+   * 能看见里面那个 [data-llg-toggle]。
+   *
+   * 拿不到事件（Node 侧的测试直接调监听器）时返回 false —— 按普通页面手势处理。
+   */
+  function onOurOwnUi(ev) {
+    if (!ev || typeof ev.composedPath !== 'function') return false;
+    return ev.composedPath().some((node) => {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.id === BTN_ID) return true;
+      return typeof node.closest === 'function' && !!node.closest(TOGGLE_SELECTOR);
+    });
+  }
+
+  /**
+   * 现在有没有**瞬时**用户激活（requestWindow() 要的就是它）。
+   *
+   * 取不到 userActivation（老浏览器 / 测试桩没给）时乐观放行：让 requestWindow()
+   * 自己去判，不因为探测不到就把恢复能力关掉。
+   */
+  function hasActivation() {
+    const ua = navigator.userActivation;
+    return !ua || typeof ua.isActive !== 'boolean' ? true : ua.isActive;
+  }
+
+  /**
    * 武装「下一次用户手势就开」。
    * requestWindow() 必须在瞬时用户激活内调用，所以在没有手势的时机（心跳里发现窗口没了、
    * 页面刚加载）只能这样等 —— 「默认开启」正是靠这条路径生效。
    */
   function arm() {
-    if (armed || !enabled || pipWin || !supported()) return;
-    armed = () => {
+    // syncWindow() 而不是 `pipWin`：窗口被浏览器收走而本地还以为它在时，用 `pipWin`
+    // 会把这次武装整个挡掉 ——「下一次手势就回来」这条路径于是永远等不到
+    if (armed || !enabled || !supported() || syncWindow()) return;
+    armed = (ev) => {
+      // 我们自己的按钮/开关上的手势：交给它的 click 处理器，别抢同一次点击。
+      // 这里**不 disarm()** —— 武装留在原处，等真正的页面手势
+      if (onOurOwnUi(ev)) return;
       disarm();
-      if (canAutoOpen()) open();
+      if (canAutoOpen()) {
+        open();
+        return;
+      }
+      // 这次手势落在「还不是播放页」的时刻（典型：从首页点视频封面，导航还没完成）：
+      // 别把它丢掉，立刻重新武装 —— 用户的下一次点击/按键就能接住
+      arm();
     };
     for (const type of GESTURE_EVENTS) document.addEventListener(type, armed, true);
   }
 
   async function open() {
-    if (!supported() || pipWin || opening) return false;
+    if (!supported() || opening) return false;
+
+    // 先跟浏览器对齐：窗口其实已经被收走时，别把「开着」当真 —— 否则这次调用会被守卫
+    // 挡掉，而按钮那边还会误以为该走 close()（那是把常驻开关写成 false 的那条路）
+    if (syncWindow()) return false;
+
+    // 没有瞬时激活就别去撞 requestWindow()：必然被拒，还会往控制台刷一条红字。
+    // 这条路径是常态（刷新 / 真导航 / 回到浏览器本体 / 心跳里的兜底），不是异常，
+    // 所以静默地等下一次手势 —— 那才是「默认开启」真正的生效路径。
+    // 注意这一判要在 disarm() 之前：重入已被上面两道守卫挡掉，这里不改任何状态。
+    if (!hasActivation()) {
+      arm();
+      refreshButton();
+      return false;
+    }
 
     disarm();
     enabled = true;
@@ -849,7 +1103,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
         disallowReturnToOpener: true,
       });
     } catch (err) {
-      // 没有用户手势、或窗口已被系统拒绝时会走到这里
+      // 走到这里说明「有激活但 requestWindow 仍被拒」（系统拒绝、或激活在异步间隙里过期）
+      // —— 上面那道 hasActivation() 已经把「压根没激活」的常态路径挡掉了
       warn(`无法打开画中画窗口：${err && err.message}`);
       pipWin = null;
       opening = false;
@@ -975,17 +1230,14 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   }
 
   /**
-   * 页面处于 hidden，或刚从 hidden 回到 visible —— 这两种时机下的关闭都算「不是用户点的」。
-   * 反过来，用户盯着 PiP 窗口点它的 X 时，页面一直 visible 且 lastVisibleAt 早已过期。
-   */
-  function isInvoluntaryClose() {
-    if (document.visibilityState === 'hidden') return true;
-    return Date.now() - lastVisibleAt <= RECENT_VISIBLE_MS;
-  }
-
-  /**
    * PiP 窗口关闭（无论是谁关的都会走到这里）。
-   * 关键点：**被 UA 关掉不是终态** —— 只要 enabled 还是 true，就立刻想办法把它弄回来。
+   *
+   * **只有我们自己的 close() 才算「关掉」**（控制栏按钮 / 设置面板开关）。其余一切
+   * 让窗口消失的操作 —— 用户点 PiP 窗口的 X、切到别的应用被 UA 关、刷新页面、真导航、
+   * 扩展重载 —— 都只是中间态：只要 enabled 还是 true，就立刻想办法把它弄回来；
+   * 弄不回来（此刻没有用户手势，见 open() 的注释）就 arm() 等下一次手势。
+   *
+   * 详见文件头「常驻语义」一节（为什么不再区分「谁关的」）。
    */
   function handlePageHide(win) {
     // 我们主动关闭时 stop() 可能已经先跑（close() 是同步返回的），pagehide 反而晚到；
@@ -994,23 +1246,14 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
     const byUs = closingByUs;
     closingByUs = false;
-    const involuntary = !byUs && isInvoluntaryClose();
-
     stop();
 
-    if (!enabled) return;
+    // 按钮/开关关的（close() 已经把 enabled 落盘成 false）→ 到此为止
+    if (byUs || !enabled) return;
 
-    if (involuntary) {
-      // 立刻试一次：切回浏览器那一刻我们通常还在用户手势的激活期内；
-      // 失败时 open() 内部会 arm()，等下一次手势
-      open();
-      return;
-    }
-
-    // 用户自己关的（PiP 窗口上的 X / 系统关的）：按显式处理，不再自动弹回来
-    enabled = false;
-    save();
-    refreshButton();
+    // 立刻试一次：有用户手势激活期就直接回来；
+    // 没有时 open() 内部会 arm()，等用户下一次点击/按键
+    open();
   }
 
   // ---------------------------------------------------------------- 按钮
@@ -1020,7 +1263,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       id: BTN_ID,
       icon: ICON_SVG,
       onClick: () => {
-        if (pipWin) close();
+        // 先跟浏览器对齐：窗口其实是浏览器收走的（`pipWin` 陈旧）时，这一下的本意是
+        // 「开回来」，而旧写法会走 close()，把常驻开关一起写成 false —— 那才是
+        // 「被关掉之后就一直是关的，还得再点一次」的来源
+        if (syncWindow()) close();
         else open();
       },
     });
@@ -1033,7 +1279,17 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   }
 
   function heartbeat() {
+    // 兜底：窗口被系统**悄悄**销毁（pagehide 没走到我们这里）时，pipWin 与浏览器里的
+    // 实际情况就不一致了。同样是「中间态」，按 handlePageHide 那套把它弄回来。
+    // 判据走 liveWindow()：`pipWin.closed` 与 API 的引用谁先更新都算数（不再只比身份）。
+    if (pipWin && !liveWindow()) {
+      stop();
+      if (enabled) open();
+      return;
+    }
+
     refreshButton();
+
     if (!pipWin) {
       // 没有任何窗口在等 pagehide 了，这个标记不该跨窗口残留
       closingByUs = false;
@@ -1061,10 +1317,11 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       isOpen: () => !!pipWin,
       displayPrimary,
       primaryParts,
+      // 注音与文节切点怎么共存（切点落在带注音的片段内时要放弃它）——纯函数，便于单测
+      richSegments,
       pipCss: () => pipCss(appearance),
       parseSettings,
       getAppearance: () => ({ ...appearance }),
-      RECENT_VISIBLE_MS,
       // 播放控制：测试与 probe 直接驱动 command()，不必模拟浮窗里的点击
       command,
       syncBar,
@@ -1078,26 +1335,34 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     if (pipWin) pushText();
   });
 
-  document.addEventListener('visibilitychange', () => {
-    const state = document.visibilityState;
-    if (state === 'hidden') {
-      pageHidden = true;
+  /**
+   * 「用户回到这个页面」的时机：切回标签页（visibilitychange）、窗口重新获得焦点
+   * （从别的应用点回来 / 从最小化恢复 —— 这种情况 visibilityState 未必跃迁，所以
+   * 光靠 visibilitychange 会漏掉）。
+   *
+   * 这正是浏览器可能刚把浮窗收走的那一刻（见文件头「常驻语义」），所以两件事都要做：
+   *   1. 先把本地状态跟浏览器对齐 —— 窗口真没了就别再以为它还在；
+   *   2. 再尽量开一次：用户是「点着页面回来」的时候，这一刻还带着瞬时激活，浮窗当场
+   *      就回来；没有激活时 open() 自己会 arm()，等下一次手势（与旧行为一致，
+   *      只是不再因为 `pipWin` 陈旧而把这个时机整个错过）。
+   */
+  function wake() {
+    if (syncWindow()) {
+      refreshButton();
       return;
     }
-    if (state !== 'visible') return;
+    if (enabled) open();
+    else refreshButton();
+  }
 
-    if (pageHidden) lastVisibleAt = Date.now(); // 只有真的从后台回来才算
-    pageHidden = false;
-    refreshButton();
-    // 回到前台时窗口已经不在了（被 UA 关掉且 pagehide 发生在 hidden 期间）→ 重新等手势
-    if (!pipWin) arm();
-  });
+  document.addEventListener('visibilitychange', wake);
+  window.addEventListener('focus', wake);
 
   // 登记到设置面板（线框图标，与 Linglass 面板内的 .toggle-icon 同一套语言）
   shared.registerFeature({
     id: 'desktopSubtitles',
     title: '桌面字幕浮窗',
-    desc: '默认开启；切回浏览器后自动恢复，关掉之后不再自动打开',
+    desc: '默认开启，而且只有这里的开关或控制栏按钮能关掉它；点浮窗自己的 X、切后台、刷新页面都会让它自己回来',
     icon: `
 <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
