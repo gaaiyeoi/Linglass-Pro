@@ -22,7 +22,7 @@
  *
  * 零依赖：CDP 走 node 原生 fetch + WebSocket。
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -53,8 +53,19 @@ const SEARCH = '日本語 字幕';
 /** 兜底视频：找一个视频页来做注入检查，语言无关（不用于验证字幕内容） */
 const FALLBACK_VIDEO = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
 
-/** 找一个能加载扩展的 Chrome：优先 Chrome for Testing，其次系统 Chrome */
+/** Arc 的可执行文件。用 --browser=arc 时走它（注意：必须先把用户正在用的 Arc 退掉，
+ *  否则新参数会被已有实例吞掉，扩展根本不会加载） */
+const ARC_BIN = '/Applications/Arc.app/Contents/MacOS/Arc';
+
+/** 找一个能加载扩展的浏览器：优先 Chrome for Testing，其次系统 Chrome */
 function pickBrowser() {
+  const requested = flag('browser');
+  if (requested && requested !== 'arc') return requested;
+  if (requested === 'arc') {
+    if (!existsSync(ARC_BIN)) throw new Error(`找不到 Arc：${ARC_BIN}`);
+    return ARC_BIN;
+  }
+
   const candidates = [
     path.join(
       os.homedir(),
@@ -118,7 +129,7 @@ class Cdp {
           this.pending.delete(id);
           reject(new Error(`CDP 超时: ${method}`));
         }
-      }, 30000);
+      }, 15000);
     });
   }
 
@@ -156,7 +167,9 @@ async function connect() {
 /** 在某个页面里求值；不传 contextId 就是页面 world */
 async function evaluate(cdp, sessionId, expression, contextId) {
   const params = {
-    expression: `(() => { try { return JSON.stringify(${expression}); } catch (e) { return JSON.stringify({ __error: String(e && e.message || e) }); } })()`,
+    // 外层必须 async 且 await 内层：内层若是 (async () => {...})()，
+    // 直接 JSON.stringify 会把它序列化成 "{}"，awaitPromise 也救不回来（顶层已是字符串）。
+    expression: `(async () => { try { return JSON.stringify(await (${expression})); } catch (e) { return JSON.stringify({ __error: String((e && e.message) || e) }); } })()`,
     returnByValue: true,
     awaitPromise: true,
   };
@@ -426,6 +439,27 @@ async function dragShadowHandle(cdp, sessionId, hostId, selector, dx) {
   return true;
 }
 
+/**
+ * 从 target 列表里挑出要操作的那个页面。
+ *
+ * 不能直接取「第一个 page」：Arc 会忽略 --user-data-dir 而用你本人的 profile，
+ * 列表里因此混着你自己的标签页 —— 实测撞上过一个 localhost 页面，attach 之后
+ * Runtime.enable 直接超时。给了 --url 时优先按它匹配。
+ */
+function pickPage(targetInfos, wantUrl) {
+  const pages = targetInfos.filter(
+    (t) => t.type === 'page' && !String(t.url).startsWith('chrome-extension://'),
+  );
+  if (wantUrl) {
+    const bare = wantUrl.split('?')[0];
+    const exact = pages.find((t) => String(t.url).startsWith(bare));
+    if (exact) return exact;
+    const youtube = pages.find((t) => String(t.url).includes('youtube.com/watch'));
+    if (youtube) return youtube;
+  }
+  return pages.find((t) => String(t.url).startsWith('http')) || pages[0] || null;
+}
+
 async function main() {
   if (!existsSync(path.join(DIST, 'manifest.json'))) {
     throw new Error('dist/ 不存在，先跑 make build');
@@ -464,16 +498,61 @@ async function main() {
 
   try {
     cdp = await connect();
-    const { targetInfos } = await cdp.send('Target.getTargets');
-    const pageTarget = targetInfos.find((t) => t.type === 'page' && !t.url.startsWith('chrome-extension://'));
-    if (!pageTarget) throw new Error('找不到页面 target');
+    const version = await cdp.send('Browser.getVersion');
+    console.log(`[probe] 内核    ${version.product || '?'}  (${version.jsVersion || '?'})`);
 
-    const { sessionId } = await cdp.send('Target.attachToTarget', {
-      targetId: pageTarget.targetId,
-      flatten: true,
-    });
-    await cdp.send('Page.enable', {}, sessionId);
-    await cdp.send('Runtime.enable', {}, sessionId);
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    let pageTarget = targetInfos.find((t) => t.type === 'page' && !t.url.startsWith('chrome-extension://'));
+    if (!pageTarget) {
+      const extTargets = targetInfos.filter((t) => String(t.url).startsWith('chrome-extension://'));
+      console.log(extTargets.length
+        ? `[probe] 扩展已加载（${extTargets.length} 个 target），但还没有普通标签页`
+        : '[probe] 没有扩展 target，--load-extension 可能被忽略');
+
+      // Arc 不吃命令行的 URL 参数，Target.createTarget 建出来的 target 也会被它立刻搬走
+      // （实测 attach 报 "No target with given id found"）。让 Arc 自己开标签页最稳。
+      const kickUrl = flag('url') || 'https://www.youtube.com/';
+      console.log(`[probe] 用 AppleScript 让 Arc 打开 ${kickUrl}`);
+      try {
+        execFileSync('osascript', ['-e', `tell application "Arc" to open location "${kickUrl}"`], { stdio: 'ignore' });
+      } catch (err) {
+        console.log(`[probe] AppleScript 失败：${err && err.message}`);
+      }
+      await sleep(6000);
+
+      const again = await cdp.send('Target.getTargets');
+      pageTarget = again.targetInfos.find((t) => t.type === 'page' && !String(t.url).startsWith('chrome-extension://'));
+      if (!pageTarget) {
+        console.log('[probe] Arc 仍然没开出标签页，当前 target：');
+        for (const t of again.targetInfos) console.log(`  ${t.type} | ${String(t.url).slice(0, 110)}`);
+        return;
+      }
+    }
+
+    console.log(`[probe] 目标页  ${String(pageTarget.url || '').slice(0, 100)}`);
+    let sessionId = null;
+    let attachErr = null;
+    for (let attempt = 1; attempt <= 3 && !sessionId; attempt += 1) {
+      try {
+        const attached = await cdp.send('Target.attachToTarget', {
+          targetId: pageTarget.targetId,
+          flatten: true,
+        });
+        sessionId = attached.sessionId;
+        // 不调 Page.enable：Arc 的 Page domain 会直接超时，而我们只需要 Runtime
+        // （Page.navigate / bringToFront 是方法调用，不依赖 enable）
+        await cdp.send('Runtime.enable', {}, sessionId);
+      } catch (err) {
+        // Arc 建完 tab 会立刻搬动它，头一次 attach 可能拿到已经失效的 session
+        attachErr = err;
+        sessionId = null;
+        await sleep(1200);
+      }
+    }
+    if (!sessionId) {
+      throw new Error(`附着页面失败（试了 3 次）：${attachErr && attachErr.message}`);
+    }
+    console.log(`[probe] 已附着  target=${String(pageTarget.targetId).slice(0, 8)}`);
 
     // 跟踪存活的 execution context：navigate 会销毁旧的、建新的，
     // 直接拿第一次抓到的那个会报 "Cannot find context with specified id"。
