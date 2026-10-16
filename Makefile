@@ -16,11 +16,12 @@ DIST     := dist
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test dev open check vendor-update vendor-from clean
+.PHONY: help build test probe dev open check vendor-update vendor-from clean
 
 help:
 	@echo "make build                        构建 dist/（正式版）"
 	@echo "make test                         跑契约测试与逻辑冒烟测试"
+	@echo "make probe                        开一个带扩展的浏览器实测（弹窗，跑完保留窗口）"
 	@echo "make dev                          监听 src/ 自动重建 + 自动重载（开发用）"
 	@echo "make open                         打开 Arc 扩展管理页（arc://extensions）"
 	@echo "make check                        检查 dist/ 是否已正确注入 mod 脚本"
@@ -33,6 +34,11 @@ build:
 # 只用 node:test，无第三方依赖。契约测试要读 vendor/，所以先跑 make vendor-update。
 test:
 	node --test tools/test/*.test.mjs
+
+# 实测探针：需要能加载扩展的浏览器（Chrome for Testing）。
+# 想指定视频就用 node tools/probe.mjs --headed --url=<地址>。
+probe:
+	node tools/probe.mjs --headed --keep
 
 dev:
 	node tools/dev.mjs
