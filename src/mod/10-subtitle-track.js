@@ -129,6 +129,14 @@
   const SKELETON_MISMATCH_LIMIT = 6;
   /** 骨架最多换几次（防抖动：视频被重新剪过时也会「匹配不上」，不能一直换） */
   const SKELETON_MAX_SWITCHES = 1;
+  /**
+   * 导入译文时按 start 找轨道句的容差（秒）。
+   *
+   * 计划里的 start 就是从这条轨道导出去的（05-srt.js 的 planImport 取的 `cues[best].start`），
+   * 所以正常情况下是**同一个数**，这里只是给浮点往返留一点余量。刻意取小：
+   * 临近两句的 start 可能只差 1 秒出头，容差放大会把译文贴到隔壁句上。
+   */
+  const IMPORT_START_TOLERANCE = 0.05;
 
   const listeners = new Set();
 
@@ -157,6 +165,13 @@
   const officialByText = new Map();
   /** 连续匹配不上的直播句数（见 SKELETON_MISMATCH_LIMIT） */
   let liveMisses = 0;
+  /**
+   * 导入的译文与当前原文轨对不上？（PLAN 031 第 4 条）
+   *
+   * `null` = 这个视频没导入过（或还没算），面板据此决定要不要提示。
+   * 不落盘：它是「当前这份轨道 vs 导入时那份」的比对结果，换了轨道就得重算。
+   */
+  let importMismatch = null;
 
   /** 骨架的加载状态机（每个视频一份） */
   const skeleton = {
@@ -434,7 +449,12 @@
     for (const live of cues) {
       const match = officialByText.get(normalizeText(live.primary));
       if (match) {
-        if (!match.secondary && live.secondary) match.secondary = live.secondary;
+        // 骨架句是新建的、secondary 恒为空，所以这里必然搬得动；`origin` 一起搬，
+        // 否则导入的译文（PLAN 031）刷新一次就降级成「采样来的译文」，会被后续采样覆盖
+        if (!match.secondary && live.secondary) {
+          match.secondary = live.secondary;
+          if (live.origin) match.origin = live.origin;
+        }
         // 采样到的那句会继续被 extendActive 更新，指针要一起挪到骨架句上
         if (live === active) active = match;
         continue;
@@ -562,6 +582,8 @@
         adoptSkeleton(list);
         skeleton.adopted = key;
         skeleton.done = true;
+        // 骨架到位了，原文轨才是完整的那条 → 此刻比对「导入时的指纹」才有意义
+        refreshImportMismatch();
 
         notify();
         scheduleSave();
@@ -661,7 +683,10 @@
     if (officialByText.size) {
       const match = matchOfficial(lines.primary, start);
       if (match) {
-        if (lines.secondary && !match.secondary) match.secondary = lines.secondary;
+        // 导入的译文优先于采样来的译文（PLAN 031）：用户自己翻的那份更可信
+        if (lines.secondary && !match.secondary && match.origin !== 'imported') {
+          match.secondary = lines.secondary;
+        }
         active = match;
         liveMisses = 0;
         return;
@@ -672,7 +697,8 @@
 
     const existing = findDuplicate(lines.primary, start);
     if (existing) {
-      if (lines.secondary) existing.secondary = lines.secondary;
+      // 同上：导入的译文不许被采样覆盖
+      if (lines.secondary && existing.origin !== 'imported') existing.secondary = lines.secondary;
       active = existing;
       return;
     }
@@ -867,6 +893,9 @@
       loading = false;
     }
 
+    // 我们自己的轨道里已经带着上一轮采用的骨架（译文随句一起落盘），所以这里先比一次；
+    // 骨架是首次采用的话，maybeLoadSkeleton() 采用完还会再算一次（见下）
+    refreshImportMismatch();
     notify();
     maybeLoadSkeleton().catch(() => {});
   }
@@ -1018,6 +1047,83 @@
       .filter((cue) => cue.primary || cue.secondary);
   }
 
+  // ---------------------------------------------------------------- 导入译文（PLAN 031）
+
+  /** 按 start 找轨道句（见 IMPORT_START_TOLERANCE 的说明） */
+  function cueAtStart(start) {
+    if (!Number.isFinite(start)) return null;
+    let best = null;
+    for (const cue of cues) {
+      const value = Number(cue && cue.start);
+      if (!Number.isFinite(value)) continue;
+      const gap = Math.abs(value - start);
+      if (gap > IMPORT_START_TOLERANCE) continue;
+      if (!best || gap < Math.abs(best.start - start)) best = cue;
+    }
+    return best;
+  }
+
+  /**
+   * 刷新「导入的译文与当前原文轨对不上」这个判断。
+   *
+   * 没导入过（`meta.import` 缺失）或轨道还空着时恒为 `null` —— 那种情况下
+   * 「对不上」没有意义，不该去打扰用户。结果只活在内存里，由 `getMeta()` 暴露给面板。
+   */
+  function refreshImportMismatch() {
+    const stamp = meta && meta.import && meta.import.fingerprint;
+    const srt = globalThis.__llgModSrt;
+    if (!stamp || !srt || typeof srt.fingerprint !== 'function' || !cues.length) {
+      importMismatch = null;
+      return;
+    }
+    importMismatch = !srt.sameFingerprint(stamp, srt.fingerprint(cues));
+  }
+
+  /**
+   * 导入译文：把 `[{ start, secondary }]` 贴回对应句（PLAN 031）。
+   *
+   * - 写上 `cue.secondary` 与 `cue.origin = 'imported'`；后者是**优先级标记**，
+   *   采样（`openCue` / `findDuplicate`）看到它就绕开，绝不把用户自己翻的覆盖成官方译文或空。
+   * - 记住导入那一刻的原文轨指纹（句数 + 首句 + 末句），下次加载时比对 —— 见第 4 条保险。
+   * - 落盘走我们自己的键（`llgTrack:<videoId>`），所以刷新后译文还在。
+   *
+   * 返回 `{ applied, missed, fingerprintMismatch }`：贴不上的要**如实报数**，不许假装全对。
+   */
+  async function applyTranslations(list) {
+    const items = Array.isArray(list) ? list : [];
+    let applied = 0;
+    let missed = 0;
+
+    for (const item of items) {
+      const text = normalizeText(item && item.secondary);
+      const cue = text ? cueAtStart(Number(item && item.start)) : null;
+      if (!cue) {
+        missed += 1;
+        continue;
+      }
+      cue.secondary = text;
+      cue.origin = 'imported';
+      applied += 1;
+    }
+
+    if (applied) {
+      const srt = globalThis.__llgModSrt;
+      meta = {
+        ...(meta || {}),
+        import: {
+          at: Date.now(),
+          fingerprint: srt && typeof srt.fingerprint === 'function' ? srt.fingerprint(cues) : null,
+        },
+      };
+      // 刚记下的指纹就是当前轨道算的，所以这一步必定算出 false
+      refreshImportMismatch();
+      notify();
+      await flush();
+    }
+
+    return { applied, missed, fingerprintMismatch: importMismatch === true };
+  }
+
   function snapshot() {
     return { meta: meta ? { ...meta } : null, cues: finalizedCues() };
   }
@@ -1027,6 +1133,7 @@
     cues = [];
     active = null;
     lastKey = null;
+    importMismatch = null;
     resetSkeletonAdoption();
     // 清空之后不要立刻又被骨架填满：这个视频本次不再采用骨架（换视频会重新允许）
     skeleton.done = true;
@@ -1069,7 +1176,9 @@
     getProgress,
     getProgressEnd,
     getCuesForExport: finalizedCues,
-    getMeta: () => (meta ? { ...meta } : null),
+    // importMismatch 是内存里的比对结果（不落盘），面板靠它决定要不要提示
+    getMeta: () => (meta ? { ...meta, importMismatch } : null),
+    applyTranslations,
     getVideoTime: currentTime,
     readLines,
     readPrimaryRich,

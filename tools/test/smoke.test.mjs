@@ -900,6 +900,11 @@ async function harness({
   vm.runInContext(await sourceOf('05-ja-segment.js'), sandbox, {
     filename: '05-ja-segment.js',
   });
+  // 05-srt.js 也要在轨道之前（文件名顺序：05-ja-segment < 05-srt < 10-subtitle-track）——
+  // 轨道在 applyTranslations 里跟它要 fingerprint（PLAN 031）
+  vm.runInContext(await sourceOf('05-srt.js'), sandbox, {
+    filename: '05-srt.js',
+  });
   vm.runInContext(await sourceOf('10-subtitle-track.js'), sandbox, {
     filename: '10-subtitle-track.js',
   });
@@ -3378,4 +3383,165 @@ test('共享心跳：五个模块共用同一个 1s 定时器，回调抛错不�
   intervals[0].fn();
   assert.deepEqual(order, ['b'], '注销后只剩没注销的那个');
   assert.equal(intervals.length, 1, '回调来去都不该反复重开定时器');
+});
+// ---------------------------------------------------------------- 导入译文（PLAN 031）
+
+/**
+ * 离线翻译工作流的回归：导出原文 → 外部翻好 → 导入译文 → 浮窗/面板/导出都能看到。
+ *
+ * 这里最要紧的一条是「采样不许覆盖导入的译文」—— 导入之后用户还要继续看视频，
+ * 一覆盖就等于白翻了。另外 `origin` 必须跟着译文一起活过 reload（adoptSkeleton
+ * 会把轨道重建成骨架句，漏搬这个标记的话，来源就丢了）。
+ */
+
+/** 把最近一次落盘的内容搬回 storage 桩（真实里 save() 已经写进去了，桩件只记不生效） */
+function persistLastSave(h, key) {
+  const last = h.saved.filter((entry) => entry[key]).pop();
+  if (!last) throw new Error(`没有落盘过 ${key}`);
+  h.stored[key] = last[key];
+  return last[key];
+}
+
+test('导入译文：贴回对应句、打上 origin，并落盘到我们自己的键', async () => {
+  const { sandbox, h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+  assert.equal(track.getCues().length, 3, '先要有骨架');
+
+  const plan = sandbox.__llgModSrt.planImport(track.getCuesForExport(), [
+    { start: 0, end: 2.5, text: '早安' },
+    { start: 2.5, end: 6, text: '今天下雨' },
+  ]);
+  assert.equal(plan.missed.length, 0);
+
+  const result = await track.applyTranslations(plan.assignments);
+  assert.equal(result.applied, 2);
+  assert.equal(result.missed, 0);
+  assert.equal(result.fingerprintMismatch, false);
+
+  const cues = track.getCues();
+  assert.equal(cues[0].secondary, '早安');
+  assert.equal(cues[1].secondary, '今天下雨');
+  assert.equal(cues[0].origin, 'imported');
+  assert.equal(cues[2].secondary, '', '没导到的句子保持原样');
+
+  const saved = persistLastSave(h, `llgTrack:${VIDEO_ID}`);
+  assert.equal(saved.cues[0].secondary, '早安', '译文必须落盘（刷新后还在）');
+  assert.equal(saved.cues[0].origin, 'imported', '来源标记一起落盘');
+  assert.equal(saved.meta.import.fingerprint.count, 3);
+  assert.equal(saved.meta.import.fingerprint.first, 'おはよう');
+  assert.equal(saved.meta.import.fingerprint.last, 'あしたは はれ です');
+});
+
+test('导入译文：继续播放时采样不把导入的译文覆盖掉（本 PLAN 的核心回归）', async () => {
+  const { sandbox, h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+
+  const plan = sandbox.__llgModSrt.planImport(track.getCuesForExport(), [
+    { start: 0, end: 2.5, text: '早安' },
+  ]);
+  await track.applyTranslations(plan.assignments);
+  assert.equal(track.getCues()[0].secondary, '早安');
+
+  // 播到这一句，官方给了它自己的译文 —— 采样不许动导入的那份
+  h.currentTime = 0.3;
+  show(h, 'おはよう', '官方译文');
+  assert.equal(track.getCues()[0].secondary, '早安', '导入的译文优先于官方/采样');
+
+  // 骨架句的时间照样由官方定（采样不改官方给的 end）
+  h.currentTime = 1.5;
+  h.tick();
+  assert.equal(track.getCues()[0].end, 2.5);
+
+  assert.equal(track.getCues()[0].origin, 'imported');
+});
+
+test('导入译文：切走再切回来，译文与 origin 都还在（走一遍 adoptSkeleton）', async () => {
+  const { sandbox, h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+
+  const plan = sandbox.__llgModSrt.planImport(track.getCuesForExport(), [
+    { start: 0, end: 2.5, text: '早安' },
+    { start: 2.5, end: 6, text: '今天下雨' },
+  ]);
+  await track.applyTranslations(plan.assignments);
+  persistLastSave(h, `llgTrack:${VIDEO_ID}`);
+
+  sandbox.location.href = 'https://www.youtube.com/watch?v=zzz999';
+  await track.reload();
+  await h.drain();
+  assert.equal(track.getCues().length, 0, '换到没有轨道的视频就是空轨道');
+
+  sandbox.location.href = WATCH_URL;
+  await track.reload();
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 3, '骨架照常采用');
+  assert.equal(track.getCues()[0].secondary, '早安');
+  assert.equal(track.getCues()[1].secondary, '今天下雨');
+  assert.equal(track.getCues()[0].origin, 'imported', 'origin 漏搬的话来源就丢了（优先级保护跟着失效）');
+  assert.equal(track.getMeta().importMismatch, false, '原文轨与导入时一致，不该报对不上');
+});
+
+test('导入译文：原文轨与导入时不一致时，getMeta 报 importMismatch（不做自动失效）', async () => {
+  // 只有我们自己的轨道、没有官方缓存：当前原文轨 2 句，而导入时记的是 3 句
+  const key = `llgTrack:${VIDEO_ID}`;
+  const short = SKELETON_CUES.slice(0, 2).map((raw) => ({
+    start: raw.start, end: raw.end, primary: raw.text, secondary: '我翻的', origin: 'imported',
+  }));
+
+  const { h, track } = await harness({
+    stored: {
+      [key]: {
+        meta: {
+          id: VIDEO_ID,
+          import: { at: 1, fingerprint: { count: 3, first: 'おはよう', last: 'あしたは はれ です' } },
+        },
+        cues: short,
+        savedAt: 1,
+      },
+    },
+  });
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 2);
+  assert.equal(track.getMeta().importMismatch, true, '对不上就要报出来（面板据此提示一次）');
+  assert.equal(track.getCues()[0].secondary, '我翻的', '只是提示，不做自动失效');
+});
+
+test('导入译文：没导入过的轨道不报 importMismatch（不去打扰用户）', async () => {
+  const { h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getMeta().importMismatch, null);
+});
+
+test('导出原文 SRT：单语、干净，不带译文那一行', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true, stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+
+  // 播过一句、官方顺手给了译文 —— 双语导出会是「一句两行、一句一行」的混合文件
+  h.currentTime = 0.2;
+  show(h, 'おはよう', '早安');
+
+  const snap = track.snapshot();
+  const panel = sandbox.__llgModPanel;
+  const bilingual = panel.toSrt(snap);
+  const sourceOnly = panel.toSrt(snap, { sourceOnly: true });
+
+  assert.match(bilingual, /おはよう\n早安/, '默认导出仍然是双语的');
+  assert.equal(sourceOnly.includes('早安'), false, '只导原文时译文一个字符都不该出现');
+  assert.match(sourceOnly, /1\n00:00:00,000 --> 00:00:02,500\nおはよう/);
+
+  const blocks = sourceOnly.split('\n\n').filter(Boolean);
+  assert.equal(blocks.length, 3, '三段，每段一句原文');
+  const linesPerBlock = blocks.map((block) => block.split('\n').filter(Boolean));
+  assert.equal(linesPerBlock.every((lines) => lines.length === 3), true,
+    '每段恒为「序号 / 时间轴 / 一行原文」');
 });

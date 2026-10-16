@@ -273,9 +273,9 @@
 .zh { display: block; margin-top: 2px; color: var(--llg-text-secondary);
   font-size: 14px; line-height: 1.5; word-break: break-word; }
 
-.foot { display: flex; gap: 6px; padding: 12px;
+.foot { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px;
   border-top: 1px solid var(--llg-divider); }
-.foot button { flex: 1; padding: 8px 8px; border-radius: var(--llg-radius-sm);
+.foot button { flex: 1 1 auto; min-width: 68px; padding: 8px 8px; border-radius: var(--llg-radius-sm);
   border: 1px solid var(--llg-border-default); background: var(--llg-button-secondary);
   color: var(--llg-text-primary); font: inherit; font-size: 13.5px; cursor: pointer;
   transition: background var(--llg-duration-fast) var(--llg-ease-out); }
@@ -370,6 +370,8 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
   <footer class="foot">
     <button type="button" data-act="md">导出 Markdown</button>
     <button type="button" data-act="srt">SRT</button>
+    <button type="button" data-act="srtSrc" title="只导原文，喂给翻译工具用">原文 SRT</button>
+    <button type="button" data-act="importSrt" title="把翻好的译文 SRT 贴回来">导入译文</button>
     <button type="button" data-act="copy">复制</button>
     <button type="button" class="ghost" data-act="clear">清空</button>
   </footer>
@@ -397,6 +399,10 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
   let mountMode = null;
   /** 当前挂在哪个元素下（YouTube 重建列之后这个引用会失效，据此重挂） */
   let mountParent = null;
+  /** 「导入译文」用的隐藏 file input（内容脚本读不了本地路径，只能走它），懒建 */
+  let importInput = null;
+  /** 已经提示过「原文轨与导入时对不上」的那个视频 id（同一个视频只打扰一次） */
+  let mismatchNotifiedFor = null;
 
   // ---------------------------------------------------------------- 工具
 
@@ -489,6 +495,7 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
       if (act === 'close') setOpen(false);
       else if (act === 'follow') onFollow();
       else if (act === 'clear') onClear();
+      else if (act === 'importSrt') onImportSrt();
       else if (act) onExport(act);
     });
 
@@ -844,6 +851,14 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     if (count && translated < count) parts.push(`译文 ${translated}/${count}`);
     if (meta?.channel) parts.push(meta.channel);
     els.sub.textContent = parts.join(' · ');
+
+    // 导入过译文、但现在的原文轨跟导入时对不上（PLAN 031 第 4 条）：只提示一次，
+    // 不做任何自动失效 —— 用户的口径是「默认没变，不对再自己重新导一次」。
+    const id = meta?.id || '';
+    if (meta?.importMismatch && mismatchNotifiedFor !== id) {
+      mismatchNotifiedFor = id;
+      toast('原文字幕与导入译文时不同，可能有对不上的句子');
+    }
   }
 
   // ---------------------------------------------------------------- 歌词进度
@@ -997,12 +1012,24 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     return lines.join('\n');
   }
 
-  function toSrt(snap) {
-    return snap.cues
+  /**
+   * `sourceOnly`：只导原文（PLAN 031）。
+   *
+   * 默认的「双语 SRT」一旦某几句已经被官方翻过，导出来就是「有的两行、有的一行」的
+   * 混合文件 —— 喂给翻译工具会乱。所以离线翻译工作流要先走这个口子拿一份干净的单语文件。
+   * 原文为空的句子（只采到译文的那些）在 sourceOnly 下没有意义，直接不导出。
+   */
+  function toSrt(snap, options = {}) {
+    const list = options && options.sourceOnly
+      ? snap.cues.filter((cue) => cue.primary)
+      : snap.cues;
+    return list
       .map((cue, i) => {
         const start = Math.max(0, cue.start || 0);
         const end = Math.max(start + 0.5, cue.end || start + 3);
-        const text = [cue.primary, cue.secondary].filter(Boolean).join('\n');
+        const text = options && options.sourceOnly
+          ? cue.primary
+          : [cue.primary, cue.secondary].filter(Boolean).join('\n');
         return `${i + 1}\n${fmtSrtTime(start)} --> ${fmtSrtTime(end)}\n${text}\n`;
       })
       .join('\n');
@@ -1042,11 +1069,81 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
       toast(`已导出 ${snap.cues.length} 句 SRT`);
       return;
     }
+    if (kind === 'srtSrc') {
+      // 离线翻译工作流的第 1 步（PLAN 031）：干净的单语原文，喂给翻译工具
+      const lines = toSrt(snap, { sourceOnly: true });
+      const count = snap.cues.filter((cue) => cue.primary).length;
+      if (!count) {
+        toast('这条轨道上还没有原文');
+        return;
+      }
+      download(`${baseName(snap)}.ja.srt`, lines, 'application/x-subrip;charset=utf-8');
+      toast(`已导出 ${count} 句原文，翻好后用「导入译文」贴回来`);
+      return;
+    }
     if (kind === 'copy') {
       navigator.clipboard
         .writeText(toMarkdown(snap))
         .then(() => toast('Markdown 已复制，直接粘进 Obsidian'))
         .catch(() => toast('复制失败，改用「导出 Markdown」'));
+    }
+  }
+
+  // ---------------------------------------------------------------- 导入译文（PLAN 031）
+
+  /**
+   * 打开文件选择框。
+   *
+   * 内容脚本拿不到本地文件路径（没有 file:// 权限，也不该有），所以只能走
+   * `<input type="file">` —— 用户点一下、选文件，我们在 change 里读。
+   * 每次用完把 `value` 清掉，否则同一个文件再选一次不会触发 change。
+   */
+  function onImportSrt() {
+    // 从设置面板进来时面板可能还关着：先把面板打开（贴回结果总得有地方看）
+    if (!built) setOpen(true);
+    if (!importInput) {
+      importInput = document.createElement('input');
+      importInput.type = 'file';
+      importInput.accept = '.srt';
+      importInput.style.display = 'none';
+      importInput.addEventListener('change', () => {
+        const file = importInput.files && importInput.files[0];
+        importInput.value = '';
+        if (file) readTranslations(file).catch(() => {});
+      });
+      document.body.append(importInput);
+    }
+    importInput.click();
+  }
+
+  /** 读文件 → 解析 → 排贴回计划 → 交给轨道 → 如实报数 */
+  async function readTranslations(file) {
+    const srt = globalThis.__llgModSrt;
+    if (!srt || typeof srt.parseSrt !== 'function') {
+      toast('SRT 模块未加载（检查 src/mod 的注入顺序）');
+      return;
+    }
+    try {
+      const parsed = srt.parseSrt(await file.text());
+      if (!parsed.length) {
+        toast('这个文件里没解析出一句字幕（只吃 SRT）');
+        return;
+      }
+
+      // 计划排的是「当前导出用的那条轨道」（end 已补齐），与 applyTranslations 匹配的是同一批 start
+      const plan = srt.planImport(track.getCuesForExport(), parsed);
+      const result = await track.applyTranslations(plan.assignments);
+
+      const notes = [`已贴 ${result.applied} / ${parsed.length} 句`];
+      if (plan.missed.length) notes.push(`${plan.missed.length} 句对不上时间轴`);
+      if (result.applied && track.getMeta()?.importMismatch) {
+        notes.push('但原文轨与导入时不一致，可能有对错的句子');
+      }
+      toast(notes.join('，'));
+
+      if (built && result.applied) renderAll();
+    } catch (err) {
+      toast(`导入失败：${(err && err.message) || err}`);
     }
   }
 
@@ -1108,6 +1205,32 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
         run: () => onExport('srt'),
       },
       {
+        id: 'exportSrtSource',
+        title: '导出原文 SRT（离线翻译用）',
+        icon: `
+<svg class="nav-row__ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3" y="6" width="18" height="12" rx="2"/>
+  <path d="M7 12h8"/><path d="M12 9l3 3-3 3"/>
+</svg>`,
+        run: () => onExport('srtSrc'),
+      },
+      {
+        id: 'importTranslation',
+        title: '导入译文 SRT',
+        icon: `
+<svg class="nav-row__ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3" y="6" width="18" height="12" rx="2"/>
+  <path d="M17 12h-8"/><path d="M12 9l-3 3 3 3"/>
+</svg>`,
+        value: () => {
+          const imported = track.getCues().filter((cue) => cue.origin === 'imported').length;
+          return imported ? `${imported} 句` : '';
+        },
+        run: () => onImportSrt(),
+      },
+      {
         id: 'copyMd',
         title: '复制 Markdown 到剪贴板',
         icon: `
@@ -1154,6 +1277,8 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
   document.addEventListener('yt-navigate-finish', () => {
     rendered = [];
     activeIndex = -1;
+    // 换视频了，新视频的「原文轨对不上」要能再提示一次
+    mismatchNotifiedFor = null;
     if (state.open && built) renderAll();
     // 换视频可能带来新的布局（例如从普通页进剧场、或从首页进播放页），
     // 挂载形态、让位与收起都要重算
