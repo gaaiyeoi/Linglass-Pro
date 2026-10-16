@@ -195,6 +195,9 @@ async function harness({ withPanel = false } = {}) {
     for (let i = 0; i < 8; i += 1) await Promise.resolve();
   };
 
+  vm.runInContext(await sourceOf('05-ja-segment.js'), sandbox, {
+    filename: '05-ja-segment.js',
+  });
   vm.runInContext(await sourceOf('10-subtitle-track.js'), sandbox, {
     filename: '10-subtitle-track.js',
   });
@@ -454,5 +457,105 @@ test('学习面板：把功能登记进设置面板注册表', async () => {
   assert.ok(feature.actions.length >= 3, '应带上导出 / 复制 / 清空等操作行');
   for (const action of feature.actions) {
     assert.ok(action.id && action.title && action.icon, '操作行必须有 id / 标题 / 图标');
+  }
+});
+
+/**
+ * 文节切分测试。
+ *
+ * 这些断言依赖 ICU 的日语词典（Intl.Segmenter），Node 升级 ICU 时可能需要跟着调。
+ * 除具体切分外，还断言了一条与实现无关的不变量：切出来的节拼回去必须等于原文。
+ */
+function sectionsOf(cut, text) {
+  const points = cut(text);
+  const out = [];
+  let prev = 0;
+  for (const point of points) {
+    out.push(text.slice(prev, point));
+    prev = point;
+  }
+  return out;
+}
+
+test('文节切分：助词与活用词尾黏回自立词，按文节断句', async () => {
+  const { sandbox } = await harness();
+  const { cut } = sandbox.__llgModJaSegment;
+
+  // 需求里给的两个例子
+  assert.deepEqual(
+    sectionsOf(cut, '私は昨日図書館で日本語の本を借りました。'),
+    ['私は', '昨日', '図書館で', '日本語の', '本を', '借りました。'],
+  );
+  assert.deepEqual(
+    sectionsOf(cut, '昨日買った本を読む'),
+    ['昨日', '買った', '本を', '読む'],
+  );
+});
+
+test('文节切分：一个文节就是一个整体，不往里插分隔符', async () => {
+  const { sandbox } = await harness();
+  const { cut } = sandbox.__llgModJaSegment;
+
+  for (const text of [
+    '食べられます', '行かなかった', '読んでいる', '勉強してみたい', 'いきませんでした',
+    'はい。',
+  ]) {
+    // 用长度而不是 deepEqual：vm 沙箱里的数组与宿主不同 realm，比原型会失败
+    assert.equal(cut(text).length, 0, `${text} 整体只有一个文节，不该画分隔符`);
+  }
+});
+
+test('文节切分：格助词之后的词另起一节，不会被黏成新词的一部分', async () => {
+  const { sandbox } = await harness();
+  const { cut } = sandbox.__llgModJaSegment;
+
+  // 「花を + かいました」「ここで + たべられます」里的 か / た 与格助词长得一样
+  assert.deepEqual(sectionsOf(cut, 'きれいな花をかいました'), ['きれいな', '花を', 'かいました']);
+  assert.deepEqual(sectionsOf(cut, 'ここでたべられます'), ['ここで', 'たべられます']);
+});
+
+test('文节切分：纯假名句按其形态判断，不靠汉字词干', async () => {
+  const { sandbox } = await harness();
+  const { cut } = sandbox.__llgModJaSegment;
+
+  assert.deepEqual(sectionsOf(cut, 'きのうはあめでした'), ['きのうは', 'あめでした']);
+  assert.deepEqual(sectionsOf(cut, 'それをみてください'), ['それを', 'みてください']);
+  assert.deepEqual(sectionsOf(cut, 'まだおわっていません'), ['まだ', 'おわっていません']);
+  // とても 的末字是提示助词 も，但它是个自立词，不能把后面的形容词黏上来
+  assert.deepEqual(
+    sectionsOf(cut, 'これはとてもおいしいです'),
+    ['これは', 'とても', 'おいしいです'],
+  );
+});
+
+test('文节切分：非日语行原样放过', async () => {
+  const { sandbox } = await harness();
+  const { cut } = sandbox.__llgModJaSegment;
+
+  assert.equal(cut('这个句子不应该被处理').length, 0);
+  assert.equal(cut('hello world').length, 0);
+  assert.equal(cut('').length, 0);
+});
+
+test('文节切分：切点严格升序，且拼回去等于原文', async () => {
+  const { sandbox } = await harness();
+  const { cut } = sandbox.__llgModJaSegment;
+
+  const texts = [
+    '私は昨日図書館で日本語の本を借りました。',
+    'きのうはあめでした',
+    'それをみてください',
+    '本を読むことがすきです',
+    '「本」を読む',
+  ];
+
+  for (const text of texts) {
+    const points = cut(text);
+    assert.ok(points.length >= 1, `${text} 应该被切开`);
+    for (let i = 1; i < points.length; i += 1) {
+      assert.ok(points[i] > points[i - 1], `${text} 的切点必须严格升序`);
+    }
+    assert.ok(points[points.length - 1] <= text.length, '切点不能越界');
+    assert.equal(sectionsOf(cut, text).join(''), text, '切出来的节拼回去必须等于原文');
   }
 });

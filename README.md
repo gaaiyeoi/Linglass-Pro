@@ -1,6 +1,6 @@
 # linglass-Pro
 
-在 [Linglass](https://chromewebstore.google.com/detail/nhncklckpmkkhjcijjgfcgclfpbbkcba) 之上做增量改造的浏览器扩展：桌面字幕浮窗、边栏学习面板、逐句字幕轨道与中日对照导出。
+在 [Linglass](https://chromewebstore.google.com/detail/nhncklckpmkkhjcijjgfcgclfpbbkcba) 之上做增量改造的浏览器扩展：桌面字幕浮窗、边栏学习面板、逐句字幕轨道与中日对照导出、原文字幕的句内断句。
 
 ## 设计原则
 
@@ -49,7 +49,9 @@ make open            # 打开浏览器扩展管理页
 | --- | --- |
 | `00-shared.js` | 共享设施：Linglass 风格的控制栏按钮工厂、功能注册表 |
 | `05-format.js` | 纯函数：时间格式化、Markdown / SRT 导出 |
+| `05-ja-segment.js` | 纯函数：把一句日文切成文节，给出断句位置 |
 | `10-subtitle-track.js` | 字幕轨道记录器（各功能的共同底座） |
+| `15-ja-break.js` | 字幕句内断句（在 Linglass 的原文字幕行上画分隔符） |
 | `30-desktop-subtitles.js` | 桌面字幕浮窗（系统级画中画 + 歌词式进度） |
 | `40-study-panel.js` | 边栏学习面板（实时字幕、逐句列表、导出） |
 | `50-settings-panel.js` | 把我们的功能挂进 Linglass 自己的设置面板 |
