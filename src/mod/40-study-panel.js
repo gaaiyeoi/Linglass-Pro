@@ -9,8 +9,12 @@
  *
  * 为什么用页面内面板而不是 chrome.sidePanel：Arc 有自己的一套侧边栏，
  * Chrome 原生 sidePanel API 在 Arc 上能否工作无法保证，官方 manifest 里也没有
- * 声明 sidePanel 权限。页面内面板在任何 Chromium 上都稳定，而且能直接复用
- * Linglass 的 CSS 变量（--radius-md / --space-* / --ease-out 会穿透 shadow 继承）。
+ * 声明 sidePanel 权限。页面内面板在任何 Chromium 上都稳定。
+ *
+ * ⚠️ 但「能直接复用 Linglass 的 CSS 变量」是**错的**（原注释这么写过，实测不成立）：
+ * 面板挂在 document.body 上，拿不到官方定义在它自己 shadow root / 侧边栏文档里的
+ * `:root` 变量；而 `:host { all: initial }` 连自定义属性一起重置。
+ * 所以官方的玻璃令牌是在 PANEL_CSS 里显式抄了一份（见那边的注释）。
  *
  * 时间戳来自 10-subtitle-track.js 自建的轨道；行级精确，词级用句内线性插值近似。
  */
@@ -43,11 +47,48 @@
   <path d="M6.2 15.8h6.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-opacity="0.38"/>
 </svg>`;
 
+  /**
+   * 官方设计令牌的本地副本。
+   *
+   * 为什么不直接引用官方的 `--lg-*` / `--glass-*`：面板挂在 document.body 上，
+   * 官方的 `:root` 块定义在它自己的 shadow root 里，根本到不了这里；
+   * 而 `:host { all: initial }` 会把宿主上一切可继承属性（**包括自定义属性**）
+   * 重置成初始值。两头一夹，`var(--radius-sm, 8px)` 这类引用**永远只会走兜底值** ——
+   * 那就是"看起来不像 Linglass"的原因。
+   *
+   * 所以这里把官方取值显式抄一份（取值全部来自 vendor/linglass-1.12.3：
+   * src/content/translate/styles.css 与 assets/sidepanel-*.css），只在本文件里用。
+   * 官方改版时这份副本不会自动跟着变，属于已知代价（视觉走样，不影响功能）。
+   */
   const PANEL_CSS = `
 :host { all: initial; position: fixed; top: 0; right: 0; width: 0; height: 0; z-index: 2147483000; }
 * { box-sizing: border-box; }
 
 .panel {
+  /* ── 玻璃令牌（深色为默认，浅色见本段末尾的 media query）── */
+  --llg-bg-glass: rgba(28, 28, 30, .92);
+  --llg-glass-blur: blur(20px);
+  --llg-glass-saturate: saturate(180%);
+  --llg-glass-overlay: linear-gradient(135deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,.02) 100%);
+  --llg-sheen: inset 0 1px 0 rgba(255, 255, 255, .08);
+  --llg-divider: rgba(255, 255, 255, .06);
+  --llg-border-subtle: rgba(255, 255, 255, .08);
+  --llg-border-default: rgba(255, 255, 255, .12);
+  --llg-shadow-panel: -8px 0 32px rgba(0, 0, 0, .45);
+  --llg-row-hover: rgba(255, 255, 255, .04);
+  --llg-button-secondary: rgba(255, 255, 255, .08);
+  --llg-button-secondary-hover: rgba(255, 255, 255, .15);
+  --llg-accent: #0A84FF;
+  --llg-accent-light: rgba(10, 132, 255, .15);
+  --llg-text-primary: #FFFFFF;
+  --llg-text-secondary: #8E8E93;
+  --llg-text-tertiary: #8E8E93;
+  --llg-text-quaternary: #AEAEB2;
+  --llg-radius-sm: 8px;
+  --llg-duration-fast: .15s;
+  --llg-duration-normal: .2s;
+  --llg-ease-out: cubic-bezier(0, 0, .2, 1);
+
   position: fixed;
   top: 0;
   right: 0;
@@ -55,19 +96,28 @@
   width: 400px;
   display: flex;
   flex-direction: column;
-  background: rgba(18, 18, 20, .97);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
-  border-left: 1px solid rgba(255, 255, 255, .09);
-  box-shadow: -12px 0 32px rgba(0, 0, 0, .45);
-  color: #f1f1f1;
+  background: var(--llg-bg-glass);
+  -webkit-backdrop-filter: var(--llg-glass-blur) var(--llg-glass-saturate);
+  backdrop-filter: var(--llg-glass-blur) var(--llg-glass-saturate);
+  border-left: 1px solid var(--llg-border-subtle);
+  box-shadow: var(--llg-shadow-panel), var(--llg-sheen);
+  color: var(--llg-text-primary);
   font: 400 13px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
   direction: ltr;
   transform: translateX(100%);
   pointer-events: none;
-  transition: transform var(--duration-normal, .2s) var(--ease-out, cubic-bezier(0, 0, .2, 1));
+  transition: transform var(--llg-duration-normal) var(--llg-ease-out);
 }
 .panel[data-state="open"] { transform: translateX(0); pointer-events: auto; }
+
+/* 玻璃高光：一层斜向渐变，压在背景之上、内容之下（::before 是同层第一个盒子） */
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--llg-glass-overlay);
+}
 
 .resize {
   position: absolute;
@@ -78,76 +128,98 @@
   cursor: col-resize;
   z-index: 2;
 }
-.resize:hover { background: rgba(10, 132, 255, .35); }
+.resize:hover { background: var(--llg-accent-light); }
 
 .head {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   padding: 12px 12px 10px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  border-bottom: 1px solid var(--llg-divider);
 }
 .head-text { flex: 1; min-width: 0; }
 .title { font-size: 13px; font-weight: 600; line-height: 1.4;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.sub { margin-top: 2px; font-size: 11px; color: rgba(255, 255, 255, .5);
+.sub { margin-top: 2px; font-size: 11px; color: var(--llg-text-secondary);
   font-variant-numeric: tabular-nums; }
 .icon {
   flex: 0 0 auto; width: 26px; height: 26px; padding: 0;
   border: none; border-radius: 6px; background: transparent;
-  color: rgba(255, 255, 255, .6); font: inherit; font-size: 17px; line-height: 1;
+  color: var(--llg-text-secondary); font: inherit; font-size: 17px; line-height: 1;
   cursor: pointer;
 }
-.icon:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.icon:hover { background: var(--llg-row-hover); color: var(--llg-text-primary); }
 
-.stage { padding: 12px 16px 14px; border-bottom: 1px solid rgba(255, 255, 255, .08); min-height: 96px; }
-.kline { position: relative; overflow: hidden; border-radius: var(--radius-sm, 8px);
+.stage { padding: 12px 16px 14px; border-bottom: 1px solid var(--llg-divider); min-height: 96px; }
+.kline { position: relative; overflow: hidden; border-radius: var(--llg-radius-sm);
   padding: 6px 10px; margin-bottom: 6px; }
 .kline:last-child { margin-bottom: 0; }
 .kline-ja { font-size: 16px; font-weight: 600; line-height: 1.45; }
-.kline-zh { font-size: 13px; color: rgba(255, 255, 255, .74); }
+.kline-zh { font-size: 13px; color: var(--llg-text-quaternary); }
 .kfill { position: absolute; left: 0; top: 0; bottom: 0; width: 0;
-  background: rgba(10, 132, 255, .22); border-radius: var(--radius-sm, 8px); }
+  background: var(--llg-accent-light); border-radius: var(--llg-radius-sm); }
 .ktext { position: relative; display: block; word-break: break-word; }
-.stage-empty { color: rgba(255, 255, 255, .38); font-size: 12px; }
+.stage-empty { color: var(--llg-text-tertiary); font-size: 12px; }
 
 .list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   margin: 0; padding: 6px 0; list-style: none; scrollbar-width: thin; }
 .list:empty::after {
   content: "打开 Linglass 字幕后会自动记录每一句";
   display: block; padding: 28px 16px; text-align: center;
-  color: rgba(255, 255, 255, .32); font-size: 12px;
+  color: var(--llg-text-tertiary); font-size: 12px;
 }
 .row { display: grid; grid-template-columns: 44px 1fr; gap: 8px;
   padding: 6px 14px 6px 12px; cursor: pointer;
   border-left: 2px solid transparent; }
-.row:hover { background: rgba(255, 255, 255, .05); }
-.row.is-active { background: rgba(10, 132, 255, .14); border-left-color: #0A84FF; }
-.stamp { color: rgba(255, 255, 255, .42); font-size: 11px;
+.row:hover { background: var(--llg-row-hover); }
+.row.is-active { background: var(--llg-accent-light); border-left-color: var(--llg-accent); }
+.stamp { color: var(--llg-text-tertiary); font-size: 11px;
   font-variant-numeric: tabular-nums; padding-top: 2px; }
 .ja { display: block; font-size: 13.5px; line-height: 1.5; word-break: break-word; }
-.zh { display: block; margin-top: 1px; color: rgba(255, 255, 255, .62);
+.zh { display: block; margin-top: 1px; color: var(--llg-text-secondary);
   font-size: 12.5px; line-height: 1.5; word-break: break-word; }
 
 .foot { display: flex; gap: 6px; padding: 10px 12px;
-  border-top: 1px solid rgba(255, 255, 255, .08); }
-.foot button { flex: 1; padding: 7px 8px; border-radius: var(--radius-sm, 8px);
-  border: 1px solid rgba(255, 255, 255, .14); background: rgba(255, 255, 255, .06);
-  color: #f1f1f1; font: inherit; font-size: 12px; cursor: pointer;
-  transition: background var(--duration-fast, .15s) var(--ease-out, cubic-bezier(0, 0, .2, 1)); }
-.foot button:hover { background: rgba(255, 255, 255, .13); }
-.foot button.ghost { flex: 0 0 auto; color: rgba(255, 255, 255, .5); }
+  border-top: 1px solid var(--llg-divider); }
+.foot button { flex: 1; padding: 7px 8px; border-radius: var(--llg-radius-sm);
+  border: 1px solid var(--llg-border-default); background: var(--llg-button-secondary);
+  color: var(--llg-text-primary); font: inherit; font-size: 12px; cursor: pointer;
+  transition: background var(--llg-duration-fast) var(--llg-ease-out); }
+.foot button:hover { background: var(--llg-button-secondary-hover); }
+.foot button.ghost { flex: 0 0 auto; color: var(--llg-text-secondary); }
 
 .toast {
   position: absolute; left: 50%; bottom: 62px;
   transform: translateX(-50%) translateY(6px);
   max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 6px 12px; border-radius: 999px;
-  background: rgba(10, 132, 255, .95); color: #fff; font-size: 12px;
+  background: var(--llg-accent); color: #fff; font-size: 12px;
   opacity: 0; pointer-events: none;
   transition: opacity .18s ease, transform .18s ease;
 }
 .toast.is-on { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* 官方同样提供浅色一套，跟随系统 */
+@media (prefers-color-scheme: light) {
+  .panel {
+    --llg-bg-glass: rgba(255, 255, 255, .72);
+    --llg-glass-overlay: linear-gradient(135deg, rgba(255,255,255,.9) 0%, rgba(255,255,255,.7) 100%);
+    --llg-sheen: inset 0 1px 0 rgba(255, 255, 255, .9);
+    --llg-divider: rgba(0, 0, 0, .06);
+    --llg-border-subtle: rgba(0, 0, 0, .08);
+    --llg-border-default: rgba(0, 0, 0, .12);
+    --llg-shadow-panel: -8px 0 32px rgba(0, 0, 0, .12);
+    --llg-row-hover: rgba(0, 0, 0, .04);
+    --llg-button-secondary: rgba(0, 0, 0, .06);
+    --llg-button-secondary-hover: rgba(0, 0, 0, .1);
+    --llg-accent: #007AFF;
+    --llg-accent-light: rgba(0, 122, 255, .12);
+    --llg-text-primary: #1D1D1F;
+    --llg-text-secondary: #636366;
+    --llg-text-tertiary: #636366;
+    --llg-text-quaternary: #48484A;
+  }
+}
 `;
 
   const PANEL_HTML = `

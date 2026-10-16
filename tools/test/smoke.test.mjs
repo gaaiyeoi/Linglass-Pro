@@ -792,6 +792,31 @@ test('桌面字幕：浮窗进度条按新的分母走', async () => {
   assert.equal(h.pipFill(), '50%', '3 / 6，而不是旧实现的 100%');
 });
 
+test('学习面板：玻璃令牌都有定义，且不引用拿不到的官方变量', async () => {
+  const source = await sourceOf('40-study-panel.js');
+
+  // 只看真正生效的那段 CSS：注释里必须能出现 var(--radius-sm, 8px) 这种反例写法
+  // （解释「为什么不能引用官方变量」），拿全文扫会把说明文字当成引用。
+  const block = source.match(/const PANEL_CSS = `([\s\S]*?)`;/);
+  assert.ok(block, '找不到 PANEL_CSS');
+
+  const used = new Set([...block[1].matchAll(/var\(\s*(--llg-[a-z0-9-]+)/g)].map((m) => m[1]));
+  const defined = new Set([...block[1].matchAll(/(--llg-[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+
+  assert.ok(used.size >= 15, `面板应当用上一整套玻璃令牌，实际只引用了 ${used.size} 个`);
+  assert.deepEqual(
+    [...used].filter((name) => !defined.has(name)),
+    [],
+    '这些令牌被 var() 引用了却没有定义',
+  );
+
+  // 官方那套（--lg-* / --glass-* / --radius-*）在这里一定拿不到：
+  // :host{all:initial} 会重置自定义属性，面板也不在官方的 shadow root 里。
+  // 引用它们只会静默走兜底值 —— 那正是「看着不像 Linglass」的根因。
+  const foreign = [...block[1].matchAll(/var\(\s*--(?!llg-)([a-z0-9-]+)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(foreign)], [], '不该引用拿不到的官方变量');
+});
+
 /**
  * 文节切分测试。
  *
