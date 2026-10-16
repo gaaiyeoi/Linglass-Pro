@@ -38,7 +38,7 @@
 
   <!-- 译文行 -->
   <text x="100" y="234" font-size="18" fill="#aab4c2">读昨天买的书。</text>
-  <text class="tip" x="290" y="234">← 样式 / 字号 / 颜色 / 双语开关都照搬官方「外观」</text>
+  <text class="tip" x="290" y="234">← 样式 / 字号 / 颜色 / 双语都能在浮窗里直接调</text>
 
   <!-- 句内进度 -->
   <text class="tip" x="640" y="252">句内进度：句级时间轴 + 线性插值</text>
@@ -58,5 +58,5 @@
   <text class="time" x="860" y="317" text-anchor="end">01:23 / 12:45</text>
 
   <text class="note" x="60" y="386">「关闭」只有两个入口：控制栏按钮、Linglass 设置面板里的开关。</text>
-  <text class="note" x="60" y="408">点浮窗自己的 ×、切到别的应用、刷新页面、换视频，都会让它自己回来（默认开启）。</text>
+  <text class="note" x="60" y="408">点浮窗自己的 ×、切到别的应用、刷新页面、换视频，都会让它自己回来（默认关闭，需要时自己开）。</text>
 </svg>

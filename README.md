@@ -164,7 +164,7 @@ Linglass-Pro/
 | `05-ja-segment.js` | 纯函数：把一句日文切成「文节」，给出断句位置（可在 Node 里直接测） |
 | `10-subtitle-track.js` | 字幕轨道记录器：只读官方 Shadow DOM 采样，并用官方缓存的整条原文轨当骨架 |
 | `15-ja-break.js` | 字幕句内断句（在 Linglass 的原文字幕行上画分隔符） |
-| `30-desktop-subtitles.js` | 桌面字幕浮窗（系统级画中画 + 歌词式进度 + 播放控制栏） |
+| `30-desktop-subtitles.js` | 桌面字幕浮窗（系统级画中画 + 歌词式进度 + 播放控制栏 + `Aa` 样式条） |
 | `40-study-panel.js` | 学习面板（实时字幕、逐句跳转、导出 Markdown / SRT） |
 | `50-settings-panel.js` | 把我们的功能挂进 Linglass 自己的设置面板 |
 | `dev-reload.dev.js` | 仅在 `make dev` 时注入：唤醒 service worker 检查新构建 |
@@ -172,12 +172,12 @@ Linglass-Pro/
 
 ## 验证方式
 
-`make test`（`node --test tools/test/*.test.mjs`，零依赖）当前 **115 例全绿**：
+`make test`（`node --test tools/test/*.test.mjs`，零依赖）当前 **123 例全绿**：
 
 ```text
 $ make test
-ℹ tests 115
-ℹ pass 115
+ℹ tests 123
+ℹ pass 123
 ℹ fail 0
 ```
 
