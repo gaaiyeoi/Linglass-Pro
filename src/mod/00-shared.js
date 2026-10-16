@@ -173,6 +173,50 @@
     }
   }
 
+  // ---------------------------------------------------------------- 共享心跳
+  //
+  // 起因（PLAN 025）：10/15/30/40/50 五个模块各挂了一个 `setInterval(fn, 1000)`，
+  // 做的都是「一秒看一眼」：查一次轨道、补一次断句标记、对齐一次浮窗状态。
+  // 没有哪一个需要独立的时间源，而一个标签页五个定时器、开五个标签页就是二十五个。
+  //
+  // 这里合成一个：注册进来的回调由同一次 tick 依次调用，于是本扩展在任意页面里
+  // 只有一个常驻定时器。
+  //
+  // 刻意**不**做错峰：错峰要靠 setTimeout 串起来，而 Node 侧的冒烟测试是用
+  // `h.tick()` 显式驱动这一个定时器的（真定时器会让测试挂住不退出）—— 错峰之后
+  // 测试就没法确定性地推进心跳了。换来的是「一秒内几次微秒级调用挤在同一拍」，
+  // 不值得为它牺牲可测性。
+
+  const HEARTBEAT_MS = 1000;
+  const tickers = [];
+  let tickTimer = 0;
+
+  function dispatchTicks() {
+    // 复制一份再遍历：回调里注销自己（或别人）不该打乱这一轮的顺序
+    for (const fn of [...tickers]) {
+      try {
+        fn();
+      } catch (err) {
+        console.warn(`[llg-shared] 心跳回调抛错：${err && err.message}`);
+      }
+    }
+  }
+
+  /**
+   * 注册一个每秒跑一次的回调。
+   * @param {() => void} fn
+   * @returns {() => void} 注销函数
+   */
+  function onTick(fn) {
+    if (typeof fn !== 'function') return () => {};
+    tickers.push(fn);
+    if (!tickTimer) tickTimer = setInterval(dispatchTicks, HEARTBEAT_MS);
+    return () => {
+      const index = tickers.indexOf(fn);
+      if (index >= 0) tickers.splice(index, 1);
+    };
+  }
+
   // ---------------------------------------------------------------- 功能注册表
   //
   // 各功能模块（30- / 40-）在加载时把自己登记进来，50-settings-panel.js 据此在
@@ -200,7 +244,7 @@
   }
 
   Object.defineProperty(globalThis, NS, {
-    value: { ensureButton, setButtonState, injectStyle, registerFeature, listFeatures },
+    value: { ensureButton, setButtonState, injectStyle, registerFeature, listFeatures, onTick },
     configurable: true,
   });
 })();

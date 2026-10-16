@@ -51,7 +51,7 @@
   const PIP_BTN_ID = 'llg-pip-btn';
   const ROOT_ID = 'llg-study-panel-root';
   const STORE_KEY = 'llgStudyPanel';
-  const HEARTBEAT_MS = 1000;
+  // 心跳间隔不在这里定义：定时器由 00-shared.js 的共享心跳统一驱动（1s，见文件末尾）
   const WIDTH_MIN = 300;
   const WIDTH_MAX = 760;
   /** 让位样式的 <style> id（00-shared.js 的 STALE_IDS 里也登记了，扩展重载后要清掉） */
@@ -383,6 +383,8 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
   let activeIndex = -1;
   let follow = true;
   let rafId = 0;
+  /** 上一次写进填充条的百分比（先比对再写，见 paint） */
+  let lastFill = '';
   let toastTimer = 0;
   /** 让位当前是不是生效（null = 还没算过），用来避免重复写 DOM 与重复补 resize */
   let layoutOn = null;
@@ -865,9 +867,13 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
     if (!built) return;
 
     const cur = track.getCurrent();
+    // 每帧一次：句内进度在 60fps 下大量重复，值没变就别碰样式（免得白白重绘）
     const percent = `${track.getProgress() * 100}%`;
-    els.fill.style.width = percent;
-    els.fill2.style.width = percent;
+    if (percent !== lastFill) {
+      lastFill = percent;
+      els.fill.style.width = percent;
+      els.fill2.style.width = percent;
+    }
 
     const ja = cur ? cur.primary : '';
     const zh = cur ? cur.secondary : '';
@@ -1161,11 +1167,12 @@ html[data-llg-panel] ytd-miniplayer { right: var(--llg-panel-w, 400px) !importan
 
   // 视频被换掉时重新挂按钮（YouTube 是 SPA，控制栏会被重建）
   refreshButton();
-  setInterval(() => {
+  // 定时器挂在 00-shared.js 的共享心跳上（PLAN 025）：整页只留一个 1s 定时器
+  shared.onTick(() => {
     refreshButton();
     // 列被 YouTube 重建之后宿主会掉出来，靠心跳把它挂回去
     syncMount();
     syncFullscreen();
     syncLayoutSignature();
-  }, HEARTBEAT_MS);
+  });
 })();

@@ -35,6 +35,18 @@
 
   /** 轨道采样的心跳间隔（正常由 MutationObserver 驱动，心跳只作兜底） */
   const HEARTBEAT_MS = 1000;
+  /**
+   * 心跳注册：优先挂到 00-shared.js 的**共享**定时器上（PLAN 025 —— 五个模块
+   * 各挂一个 1s 定时器是纯浪费，现在整个扩展只有一个）。
+   *
+   * 留 `setInterval` 兜底是因为本文件是「字幕轨道」这块公用的底座：被别人单独
+   * 拿走/裁剪时（shared 不存在）它仍然要能自己跑起来。
+   */
+  const everySecond = (fn) => {
+    const shared = globalThis.__llgModShared;
+    if (shared && typeof shared.onTick === 'function') shared.onTick(fn);
+    else setInterval(fn, HEARTBEAT_MS);
+  };
   /** 落盘去抖：字幕可能一秒变好几条，不必每条都写 storage */
   const SAVE_DEBOUNCE_MS = 800;
   /** 拿不到观察到的结束时间时，给一句的默认时长 */
@@ -57,6 +69,30 @@
   const MAX_CUE_SECONDS = 20;
   /** 重看同一段时判定「同一句」的时间容差 */
   const DEDUPE_WINDOW_SECONDS = 2.5;
+
+  /**
+   * 单个视频最多保留多少句（PLAN 025）。
+   *
+   * 没有这个上限时，挂着看几小时直播会让 `cues` 与学习面板的 `<li>` 一起线性长下去
+   * （用户报的「内存越用越多」）。5000 句 ≈ 十小时直播（按每句 7 秒算），
+   * 超出后丢**最旧**的：正在播的位置与导出要看的都是最近的句子，而 `indexAt()`
+   * 的二分查找在丢弃前缀之后依然成立。
+   */
+  const MAX_CUES = 5000;
+
+  /** 落盘上限：最多留多少个视频的轨道 */
+  const MAX_STORED_TRACKS = 30;
+  /** 落盘 TTL：轨道超过这个年龄就删（30 天） */
+  const TRACK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  /**
+   * 我们自己的轨道索引键。
+   *
+   * 为什么需要它：`llgTrack:<videoId>` 是「按视频一个键」的写法，要给它做上限/TTL
+   * 就必须知道有哪些键、各自什么时候写的 —— 而 `chrome.storage.local.getKeys()`
+   * 只有 Chrome 130+ 有，老版本只能 `get(null)` 把整份 storage（几 MB）搬进内存，
+   * 那正是我们想避免的事。所以自己记一份小索引（30 条上下）。
+   */
+  const INDEX_KEY = 'llgTrackIndex';
 
   // ---------------------------------------------------------------- 官方整条轨（骨架）
   //
@@ -100,6 +136,13 @@
   let meta = null;
   /** 当前正在显示的那一句（不一定在数组末尾——用户会往回拖进度条） */
   let active = null;
+  /**
+   * 最近一次 readLines() 的结果。
+   *
+   * 只有 capture()（MutationObserver + 心跳驱动）会写它，getProgress() 每帧
+   * 只读它 —— 见 onTimeline() 的注释（PLAN 025 的根因第 1 条）。
+   */
+  let lastLines = null;
   let boundHost = null;
   let observer = null;
   let videoRef = null;
@@ -157,17 +200,17 @@
    * textContent 会把注音拼在汉字后面 ——「夜」+「よる」=「夜よる」，于是浮窗、面板列表、
    * 导出的 Markdown / SRT 里全长出这种"重复标记"。
    *
-   * 官方自己取纯文本时就是先 clone 再删掉所有 rt（vendor/linglass-1.12.3/assets/
+   * 官方自己取纯文本时是先 clone 再删掉所有 rt（vendor/linglass-1.12.3/assets/
    * promoCards-*.js 的 Tn()），15-ja-break.js 的 textOf() 也是同一口径（它的插入位置
-   * 要对齐官方的字符偏移）。三处口径必须一致 —— 否则「译文贴回骨架句」的文本匹配
-   * 会因为一边带注音、一边不带而莫名失败。
+   * 要对齐官方的字符偏移）。三处**口径**（结果）必须一致 —— 否则「译文贴回骨架句」的
+   * 文本匹配会因为一边带注音、一边不带而莫名失败；但实现不必都是 clone（见下）。
    */
   function plainText(el) {
-    if (el.querySelector('rt')) {
-      const clone = el.cloneNode(true);
-      for (const rt of clone.querySelectorAll('rt')) rt.remove();
-      return clone.textContent || '';
-    }
+    // 走 subtreeText() 而不是 cloneNode(true) + 删 rt（PLAN 025）：注音行在日语学习场景里
+    // 是常态，而 clone 每读一次就造一棵等大的 DOM 树交给 GC —— 这是「看久了越来越卡」
+    // 里最不值当的一份开销。subtreeText() 就是同一件事的不建节点版本（跳过 RT、
+    // 其余文本节点按顺序拼起来），两者结果逐字符相同。
+    if (el.querySelector('rt')) return subtreeText(el, null);
     return el.textContent || '';
   }
 
@@ -401,6 +444,28 @@
 
     cues = merged.concat(extras).sort((a, b) => a.start - b.start);
     liveMisses = 0;
+    // 官方整条轨本身也可能有几千句（长视频 / 直播），同样受上限约束
+    enforceCueLimit();
+    invalidateEstimate();
+  }
+
+  /**
+   * 句数上限（PLAN 025）：超出就丢**最旧**的那几句。
+   *
+   * 除了 `cues`，还要把被丢掉的句子从 `officialByText`（Map）里摘干净 ——
+   * Map 会一直拽着对象不放，不清就等于上限白设了（那正是「内存只涨不降」的一半）。
+   * `officialCues` 是 WeakSet，本来就不阻止回收，但一起清掉更省心。
+   */
+  function enforceCueLimit() {
+    if (cues.length <= MAX_CUES) return;
+
+    const gone = new Set(cues.splice(0, cues.length - MAX_CUES));
+    if (active && gone.has(active)) active = null;
+    for (const cue of gone) {
+      officialCues.delete(cue);
+      const key = normalizeText(cue.primary);
+      if (officialByText.get(key) === cue) officialByText.delete(key);
+    }
     invalidateEstimate();
   }
 
@@ -525,6 +590,7 @@
       else hi = mid;
     }
     cues.splice(lo, 0, cue);
+    enforceCueLimit();
     invalidateEstimate();
   }
 
@@ -621,9 +687,14 @@
    * 采样一次字幕状态。字幕空档期不建句，只收尾。
    * 每次「换了新的一句」都通知订阅者 —— 桌面字幕靠它做到零延迟跟读，
    * 不必等下一个心跳。
+   *
+   * 顺便把读到的这一份留给 getProgress() 用（见 onTimeline）：字幕 DOM 一有变化
+   * 这个函数就跑（MutationObserver），没变化时心跳每秒兜一次，所以那份缓存最多
+   * 陈旧 1 秒，而「换行那一刻」是零延迟的。
    */
   function capture() {
     const lines = readLines();
+    lastLines = lines;
     const key = lines ? `${lines.primary}\u0000${lines.secondary}` : '';
 
     if (key === lastKey) {
@@ -692,13 +763,63 @@
     }, SAVE_DEBOUNCE_MS);
   }
 
+  /** 读我们自己的轨道索引（读不出来就当空） */
+  async function readIndex() {
+    const stored = await chrome.storage.local.get(INDEX_KEY);
+    const value = stored && stored[INDEX_KEY];
+    const entries = value && Array.isArray(value.entries) ? value.entries : [];
+    return entries.filter((entry) => entry && typeof entry.key === 'string');
+  }
+
+  /**
+   * 算出「该留哪些、该删哪些」。
+   *
+   * 排序把当前这条顶到最前（它的 savedAt 就是 now），所以「上限」永远先淘汰别人 ——
+   * 不会出现「正在看的这个视频的轨道被自己挤掉」这种荒唐结果。
+   */
+  function pruneIndex(entries, currentKey, now) {
+    const others = new Map();
+    for (const entry of entries) {
+      if (entry.key === currentKey) continue;
+      // 只认我们自己的键：官方那批 subtitle-cache:* 绝不能碰
+      if (!entry.key.startsWith(STORE_PREFIX)) continue;
+      if (entry.key === INDEX_KEY) continue;
+      const savedAt = Number(entry.savedAt);
+      others.set(entry.key, Number.isFinite(savedAt) ? savedAt : 0);
+    }
+
+    const ordered = [[currentKey, now], ...[...others].sort((a, b) => b[1] - a[1])];
+    const keep = [];
+    const drop = [];
+    for (const [key, savedAt] of ordered) {
+      const fresh = key === currentKey || (now - savedAt) < TRACK_TTL_MS;
+      if (fresh && keep.length < MAX_STORED_TRACKS) keep.push({ key, savedAt });
+      else drop.push(key);
+    }
+    return { keep: { entries: keep }, drop };
+  }
+
+  /**
+   * 落盘轨道 + 维护索引（PLAN 025）。
+   *
+   * 索引与轨道放在**同一次 `set()`** 里：既少一次写，也让「轨道写了、索引没写」
+   * 这种半截状态不可能出现。删除是随后单独一次 `remove()`，失败也只是下次再删。
+   */
   async function save() {
     const key = storeKey();
     if (!key) return;
     try {
-      await chrome.storage.local.set({ [key]: { meta, cues, savedAt: Date.now() } });
-    } catch {
-      // storage 不可用时静默降级：内存里的轨道仍然可用
+      const now = Date.now();
+      const { keep, drop } = pruneIndex(await readIndex(), key, now);
+      await chrome.storage.local.set({
+        [key]: { meta, cues, savedAt: now },
+        [INDEX_KEY]: keep,
+      });
+      if (drop.length) await chrome.storage.local.remove(drop);
+    } catch (err) {
+      // storage 不可用时静默降级：内存里的轨道仍然可用。
+      // 但要说一声 —— 配额写满时 set() 正是静默失败的（用户看到的是「进度记不住了」）
+      warn(`落盘失败（配额写满？）：${err && err.message}`);
     }
   }
 
@@ -725,6 +846,8 @@
     active = null;
     lastKey = null;
     lastTickTime = null;
+    // 换视频了：上一部片的行不该再参与「画面与时间轴对得上吗」的判断
+    lastLines = null;
     resetSkeletonAdoption();
     invalidateEstimate();
 
@@ -735,6 +858,8 @@
       if (stored && Array.isArray(stored.cues) && stored.cues.length) {
         cues = stored.cues;
         meta = { ...next, ...stored.meta, ...next, title: next.title || stored.meta?.title || '' };
+        // 旧版本（没有上限时）存下来的长轨也要收一收
+        enforceCueLimit();
       }
     } catch {
       // 读不出来就当新视频
@@ -862,7 +987,12 @@
    * 不代表时间轴错了，判了会让进度条在正常播放时闪成 0。
    */
   function onTimeline(primary) {
-    const lines = readLines();
+    // ⚠️ 这里**必须**用 capture() 缓存的那一份，不能自己 readLines()（PLAN 025 的根因）：
+    // 本函数在 getProgress() 的路径上，而 getProgress() 被两个 rAF 循环每帧调用
+    // （浮窗一个、面板一个），于是「面板 + 浮窗同时开着」时同一行文本每秒要被
+    // 查询/解析上百次 —— 而且读的还是同一份没变过的 DOM。缓存由 MutationObserver
+    // 与 1s 心跳维护，换行那一刻就是新的。
+    const lines = lastLines;
     if (!lines || !lines.primary) return true;
     return lines.primary === primary;
   }
@@ -906,6 +1036,9 @@
     if (key) {
       try {
         await chrome.storage.local.remove(key);
+        // 索引里那一条也要摘掉：留着它就等于白占一个上限名额，而且它指向的键已经没了
+        const entries = (await readIndex()).filter((entry) => entry.key !== key);
+        await chrome.storage.local.set({ [INDEX_KEY]: { entries } });
       } catch {
         // 忽略
       }
@@ -955,5 +1088,5 @@
   });
 
   loadForCurrentVideo().catch((err) => warn(`初始化失败：${err && err.message}`));
-  setInterval(heartbeat, HEARTBEAT_MS);
+  everySecond(heartbeat);
 })();

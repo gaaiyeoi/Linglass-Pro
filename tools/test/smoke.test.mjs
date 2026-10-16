@@ -51,15 +51,27 @@ async function sourceOf(file) {
  * @param {boolean} [options.withStorageGetKeys] 桩上带不带 `chrome.storage.local.getKeys()`。
  *                                      默认不带 = 老版本 Chrome，骨架的枚举退化路径会走
  *                                      `get(null)`；打开它测「有 getKeys 就不搬整份 storage」。
+ * @param {boolean} [options.noPipStored] 不预置 `llgPip` 落盘（`withPip` 时默认会预置
+ *                                      `{enabled:true}`，见函数体里的说明）。只有
+ *                                      「桌面字幕默认值」那条用例需要它。
  */
 async function harness({
   withPanel = false,
   withPip = false,
   withColumn = false,
   withStorageGetKeys = false,
+  noPipStored = false,
   stored = {},
   settings = null,
 } = {}) {
+  // 桌面字幕自 PLAN 025 起默认**关闭**（用户选择「视频内嵌字幕优先」）。下面这一批
+  // 「桌面字幕：…」用例测的是**开关开着之后**的常驻行为（窗口被 UA 收走能不能回来、
+  // 点 X 算不算关闭……），所以这里默认预置落盘 enabled: true。
+  // 默认值本身由「桌面字幕：默认关闭（视频内嵌字幕优先）」那条用例覆盖（它传 noPipStored）。
+  if (withPip && !noPipStored && !(stored && stored.llgPip)) {
+    stored = { ...stored, llgPip: { enabled: true } };
+  }
+
   const h = {
     // 字幕浮层 Shadow DOM 的可控状态
     primary: '',
@@ -93,6 +105,11 @@ async function harness({
     storageReads: [],
     /** chrome.storage.local.getKeys() 被调了几次（枚举退化路径的代价，见 PLAN 014） */
     storageGetKeysCalls: 0,
+    /**
+     * 字幕 shadowRoot 被查了几次。
+     * 用来钉住 PLAN 025 的根因：getProgress()（每帧调用）绝不能再读字幕 DOM。
+     */
+    subtitleQueries: () => subtitleQueries,
     // 官方外观设置（chrome.storage.sync）与它的变更监听器
     sync: settings == null ? {} : { 'linglass-settings': settings },
     syncListeners: [],
@@ -224,8 +241,12 @@ async function harness({
     },
   };
 
+  /** 字幕 shadowRoot 的查询计数（PLAN 025 的热路径回归断言用） */
+  let subtitleQueries = 0;
+
   const subtitleRoot = {
     querySelector(selector) {
+      subtitleQueries += 1;
       if (selector === '.subtitle-group') return group;
       if (selector === '.subtitle.subtitle-primary') return primaryEl;
       if (selector === '.subtitle.subtitle-secondary') return secondaryEl;
@@ -658,6 +679,14 @@ async function harness({
     SEPARATOR: '|',
   };
 
+  // 真实 00-shared.js 不加载（控制栏那套没法在桩里跑），但**共享心跳**必须照它的
+  // 语义提供：各模块用 shared.onTick(fn) 注册 1s 心跳，h.tick() 就是那一次 tick
+  // （PLAN 025 —— 五个 setInterval 合成一个，桩件要给出同一件事的替身）。
+  sandbox.__llgModShared.onTick = (fn) => {
+    h.intervals.push(fn);
+    return () => {};
+  };
+
   sandbox.documentPictureInPicture = {
     get window() {
       return h.pip.window;
@@ -881,21 +910,33 @@ async function harness({
   return { sandbox, h, track: sandbox.__llgModTrack };
 }
 
-/** 让当前字幕变成指定文本（模拟 Linglass 更新了 Shadow DOM） */
+/** 让当前字幕变成指定文本（模拟 Linglass 更新了 Shadow DOM，**没有**注音） */
 function show(h, primary, secondary = '') {
   h.primary = primary;
   h.secondary = secondary;
+  // 真实重渲染之后上一行的 <ruby>/<rt> 不会留在新的一行里，桩件要一起清掉
+  h.primaryRt = false;
+  h.primaryNodes = null;
   h.tick();
 }
 
 /**
  * 让当前原文行变成「带振假名」的样子：`full` 是 textContent（含注音），
  * `plain` 是剥掉 rt 之后的文本。用于验证我们读的是后者。
+ *
+ * 桩件给的是**真实 DOM 的形状**：`<ruby>` 里「汉字文本节点 + <rt>注音</rt>」，
+ * 所以两种读法（按文本节点遍历、或 clone 后删 rt）都得得到 `plain`。
+ * 旧桩只造了 `cloneNode()` 那条路径（PLAN 025 的实现不再 clone，桩件必须描述
+ * DOM 本身而不是某一种实现）。
  */
 function showFurigana(h, full, plain, secondary = '') {
   h.primaryRt = true;
   h.primary = full;
   h.primaryPlain = plain;
+  h.primaryNodes = [
+    { nodeType: 3, data: plain, textContent: plain },
+    { nodeName: 'RT', textContent: full.slice(plain.length), childNodes: [] },
+  ];
   h.secondary = secondary;
   h.tick();
 }
@@ -1001,11 +1042,15 @@ test('字幕轨道：画面上的振假名不会让进度误判成 0', async () 
   show(h, '夜', '晚上');
   await h.drain();
 
-  // 官方重渲染这一行时带上了振假名：textContent 变成「夜よる」，
+  // 官方重渲染这一行时带上了振假名：textContent 变成「夜よる」、DOM 里多了 <rt>，
   // 但它跟时间轴里的「夜」是同一句 —— 剥 rt 之后两边口径才一致
   h.primaryRt = true;
   h.primary = '夜よる';
   h.primaryPlain = '夜';
+  h.primaryNodes = [
+    { nodeType: 3, data: '夜', textContent: '夜' },
+    { nodeName: 'RT', textContent: 'よる', childNodes: [] },
+  ];
   h.currentTime = 12;
   h.tick();
 
@@ -1222,6 +1267,145 @@ test('字幕轨道：落盘键名带上视频 id，去抖期间只写一次', as
   await track.flush();
   await h.drain();
   assert.equal(h.saved.length, 2, 'flush 应强制再写一次，确保数据落地');
+});
+
+// ---------------------------------------------------------------- 热路径与内存（PLAN 025）
+
+/**
+ * 卡顿的根因回归（PLAN 025 第 1 条）。
+ *
+ * 桌面浮窗与学习面板各自有一个 rAF 循环，每帧都调 track.getProgress()；而旧实现里
+ * getProgress() → onTimeline() → readLines() 会去查字幕 Shadow DOM（并且可能在
+ * 注音行上 cloneNode 整行）。两个循环同时跑时同一份没变过的文本每秒被读上百次。
+ *
+ * 现在那一份由 capture()（MutationObserver + 1s 心跳）缓存，getProgress() 一帧都
+ * 不该碰 DOM。
+ */
+test('字幕轨道：每帧读进度不再反复查询 Shadow DOM（卡顿的根因）', async () => {
+  const { h, track } = await harness();
+
+  h.currentTime = 10;
+  show(h, 'テスト', '测试'); // 换句 → capture() 真的读了一次
+  const baseline = h.subtitleQueries();
+  assert.ok(baseline > 0, '换句时必须读字幕 DOM');
+
+  // 模拟 4 秒的播放（≈ 240 帧，两个 rAF 循环就是 480 次 getProgress）
+  for (let frame = 0; frame < 240; frame += 1) {
+    h.currentTime = 10 + frame / 60;
+    track.getProgress();
+  }
+
+  assert.equal(
+    h.subtitleQueries(),
+    baseline,
+    'getProgress() 是每帧调用的，不许再读字幕 DOM（旧实现每帧查 3 次 + 可能克隆整行）',
+  );
+
+  // 缓存不能影响进度本身的正确性：10 → 16 的句子里，播到 13s 就是 50%
+  h.currentTime = 13;
+  assert.equal(track.getProgress(), 0.5);
+  assert.equal(h.subtitleQueries(), baseline, '对了时间之后同样不该读 DOM');
+});
+
+/**
+ * 超长视频 / 直播的句数上限（PLAN 025 第 4 条）：没有它，`cues` 与面板的 `<li>`
+ * 会跟着直播时长线性长下去（用户报的「内存越用越多」）。
+ */
+test('字幕轨道：超长视频/直播的句数有上限（不会无限增长）', async () => {
+  const MAX = 5000;
+  const raw = [];
+  for (let i = 0; i < MAX + 200; i += 1) {
+    raw.push({ start: i, end: i + 0.9, text: `t${i}`, rawText: `t${i}`, id: `c${i}` });
+  }
+
+  const { h, track } = await harness({ stored: officialCache(raw) });
+  await h.drain();
+  await h.drain();
+
+  const cues = track.getCues();
+  assert.equal(cues.length, MAX, `句数上限应是 ${MAX}，实际 ${cues.length}`);
+  assert.equal(cues[0].primary, 't200', '超出时丢的是**最旧**的句子（正在播的在末尾）');
+  assert.equal(cues[cues.length - 1].primary, `t${MAX + 199}`, '最新的句子必须留着');
+
+  h.currentTime = MAX + 199.5;
+  assert.ok(track.getProgress() > 0, '丢掉前缀之后二分查找与进度仍然成立');
+});
+
+/**
+ * 落盘 TTL（PLAN 025 第 3 条）。
+ *
+ * 旧实现每看一个新视频就写一条 `llgTrack:<id>`，没有上限也没有 TTL，只有用户手动
+ * 「清空」才会删；默认配额约 10MB，写满之后 `set()` 静默失败 —— 表现是「进度记不住了」。
+ */
+test('字幕轨道：超过 TTL 的旧轨道会被删掉', async () => {
+  const now = Date.now();
+  const entries = [];
+  const stored = {
+    'subtitle-cache:index': { entries: [] },
+    // 官方缓存（绝不能碰）与我们的旧轨道混在一起
+    'subtitle-cache:v6:abc123:ja:primary': { cues: [] },
+  };
+
+  for (let i = 0; i < 5; i += 1) {
+    const key = `llgTrack:fresh${i}`;
+    entries.push({ key, savedAt: now - (i + 1) * 1000 });
+    stored[key] = { meta: { id: `fresh${i}` }, cues: [], savedAt: now - (i + 1) * 1000 };
+  }
+  const ancient = 'llgTrack:ancient';
+  entries.push({ key: ancient, savedAt: now - 40 * 24 * 60 * 60 * 1000 });
+  stored[ancient] = { meta: { id: 'ancient' }, cues: [] };
+  stored.llgTrackIndex = { entries };
+
+  const { h } = await harness({ stored });
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  h.runTimers();
+  await h.drain();
+
+  const written = h.saved.at(-1);
+  assert.ok(written, '应当写了一次盘');
+  const keys = written.llgTrackIndex.entries.map((entry) => entry.key);
+
+  assert.equal(keys.length, 6, '5 条新鲜 + 当前这条，一条都不该被名额挤掉');
+  assert.ok(keys.includes(`llgTrack:${VIDEO_ID}`), '当前视频必须留在索引里');
+  assert.ok(!keys.includes(ancient), '超过 TTL（30 天）的轨道要淘汰');
+  assert.deepEqual(
+    h.removed.flat(),
+    [ancient],
+    '只删那一条过期的；官方缓存与别人的轨道都不许碰',
+  );
+});
+
+/** 落盘条数上限（PLAN 025 第 3 条）：名额满了先淘汰最旧的 */
+test('字幕轨道：落盘最多留 30 个视频的轨道', async () => {
+  const now = Date.now();
+  const entries = [];
+  const stored = { 'subtitle-cache:index': { entries: [] } };
+
+  for (let i = 0; i < 40; i += 1) {
+    const key = `llgTrack:old${i}`;
+    entries.push({ key, savedAt: now - (i + 1) * 1000 });
+    stored[key] = { meta: { id: `old${i}` }, cues: [], savedAt: now - (i + 1) * 1000 };
+  }
+  stored.llgTrackIndex = { entries };
+
+  const { h } = await harness({ stored });
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  h.runTimers();
+  await h.drain();
+
+  const written = h.saved.at(-1);
+  const keys = written.llgTrackIndex.entries.map((entry) => entry.key);
+
+  assert.equal(keys.length, 30, `索引最多留 30 条，实际 ${keys.length}`);
+  assert.ok(keys.includes(`llgTrack:${VIDEO_ID}`), '当前视频必须留在索引里');
+
+  // 40 条旧轨道 + 当前位置 → 只留 30 → 淘汰 11 条最旧的
+  const removed = h.removed.flat();
+  assert.equal(removed.length, 11, `应当删掉 11 条最旧的，实际 ${removed.length}`);
+  assert.ok(!removed.includes(`llgTrack:${VIDEO_ID}`), '当前视频绝不能被自己挤掉');
+  assert.ok(!removed.includes('llgTrack:old0'), '被淘汰的是最旧的那一批（old29 往后）');
 });
 
 // ---------------------------------------------------------------- 官方整条轨（骨架）
@@ -1799,21 +1983,38 @@ test('学习面板：把功能登记进设置面板注册表', async () => {
 
 // ---------------------------------------------------------------- 桌面字幕常驻
 
-test('桌面字幕：默认开启，但要等第一次用户手势才真正开窗', async () => {
-  const { sandbox, h } = await harness({ withPip: true });
+/**
+ * PLAN 025 改了默认值：用户选择「视频内嵌字幕优先」——官方那层字幕本来就在画面里
+ * （还能点词查词），没表过态时不该再自动多弹一扇系统窗口。
+ *
+ * ⚠️ 这条用例**替换**了原来的「桌面字幕：默认开启，但要等第一次用户手势才真正开窗」
+ * （旧断言固化了 PLAN 016 的旧语义「默认开启」，而本轮需求就是改掉它）。
+ * 旧用例想守住的另一半「开启之后要等第一次用户手势、且落盘」在新用例里继续断言。
+ */
+test('桌面字幕：默认关闭（视频内嵌字幕优先），没开过就不弹窗', async () => {
+  const { sandbox, h } = await harness({ withPip: true, noPipStored: true });
   const pip = sandbox.__llgModPip;
-
-  assert.equal(pip.isEnabled(), true, '没表过态时默认就是开着的');
-  assert.equal(pip.isOpen(), false);
-  assert.equal(h.pip.requestCount, 0, 'requestWindow 要瞬时用户激活，加载时不能硬开');
-
-  h.gesture();
   await h.drain();
 
-  assert.equal(h.pip.requestCount, 1);
+  assert.equal(pip.isEnabled(), false, '没表过态时默认是关的（画面里的官方字幕优先）');
+  assert.equal(pip.isOpen(), false);
+  assert.equal(h.pip.requestCount, 0, '加载时不能硬开');
+
+  // 默认关着 → 页面手势也不该把窗口顶出来（否则「默认关闭」形同虚设）
+  h.gesture();
+  await h.drain();
+  assert.equal(h.pip.requestCount, 0, '没开过的功能不许被手势自动打开');
+  assert.equal(pip.isOpen(), false);
+
+  // 用户显式打开：走设置面板开关那条真实路径
+  const feature = h.features.find((f) => f.id === 'desktopSubtitles');
+  assert.ok(feature, '桌面字幕应登记为可开关功能');
+  h.withActivation(() => feature.toggle());
+  await h.drain();
+
   assert.equal(pip.isOpen(), true);
   assert.equal(h.pip.lastOptions.disallowReturnToOpener, true, '不给「返回标签页」按钮');
-  assert.equal(h.saved.at(-1).llgPip.enabled, true, '常驻开关要落盘');
+  assert.equal(h.saved.at(-1).llgPip.enabled, true, '开了之后要落盘，下次自己回来');
 });
 
 test('桌面字幕：切回浏览器时被 UA 关掉，下一次手势把它接回来', async () => {
@@ -2647,4 +2848,62 @@ test('文节切分：切点严格升序，且拼回去等于原文', async () =>
     assert.ok(points[points.length - 1] <= text.length, '切点不能越界');
     assert.equal(sectionsOf(cut, text).join(''), text, '切出来的节拼回去必须等于原文');
   }
+});
+// ---------------------------------------------------------------- 共享心跳（PLAN 025）
+
+/**
+ * 这一条用的是**真正的** 00-shared.js（不是 harness 里那个桩）：定时器合并是
+ * 省资源的做法，得有人守着「真的只起一个」。
+ *
+ * 只在独立沙箱里加载它 —— 控制栏那套（ensureButton / injectStyle）在桩件里没法跑，
+ * 而这里也不碰它们。加载时唯一会碰 DOM 的是清僵尸元素（`document.getElementById`）。
+ */
+test('共享心跳：五个模块共用同一个 1s 定时器，回调抛错不拖累别人', async () => {
+  const intervals = [];
+  const warnings = [];
+  const sandbox = {
+    console: {
+      log: () => {},
+      warn: (...args) => warnings.push(args.join(' ')),
+      error: () => {},
+    },
+    setInterval: (fn, ms) => {
+      intervals.push({ fn, ms });
+      return intervals.length;
+    },
+    clearInterval: () => {},
+    document: { getElementById: () => null },
+  };
+  sandbox.window = sandbox;
+
+  const context = vm.createContext(sandbox);
+  vm.runInContext(await sourceOf('00-shared.js'), context, { filename: '00-shared.js' });
+
+  const shared = sandbox.__llgModShared;
+  assert.ok(shared && typeof shared.onTick === 'function', '00-shared.js 应提供共享心跳');
+  assert.equal(intervals.length, 0, '没人注册时不该起定时器（页面不白跑一个 1s 空转）');
+
+  const order = [];
+  const offA = shared.onTick(() => order.push('a'));
+  shared.onTick(() => {
+    order.push('b');
+    throw new Error('boom');
+  });
+  const offC = shared.onTick(() => order.push('c'));
+
+  assert.equal(intervals.length, 1, '五个模块共用一个定时器：注册几个回调都只起一个');
+  assert.equal(intervals[0].ms, 1000);
+
+  intervals[0].fn();
+  assert.deepEqual(order, ['a', 'b', 'c'], '按注册顺序依次调用');
+  assert.equal(warnings.length, 1, '抛错要报出来（不然静默失效最难查）');
+  assert.match(warnings[0], /boom/);
+
+  // 注销要真的生效，且不影响这一轮与下一轮的其余回调
+  offA();
+  offC();
+  order.length = 0;
+  intervals[0].fn();
+  assert.deepEqual(order, ['b'], '注销后只剩没注销的那个');
+  assert.equal(intervals.length, 1, '回调来去都不该反复重开定时器');
 });

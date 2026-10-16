@@ -16,7 +16,12 @@
  *
  * ── 常驻语义（本文件最容易被改坏的部分，先读这段）──
  *
- * 期望：**默认开启，而且只有我们自己的按钮/开关能关掉它。**
+ * 期望：**用户一旦打开，就只有我们自己的按钮/开关能关掉它。**
+ *
+ * ⚠️ 默认值是 **false**（PLAN 025，用户选择「视频内嵌字幕优先」）：官方那层字幕本来
+ * 就在画面里显示，没表过态时不该再自动多弹一扇系统窗口。下面这套「窗口消失了也要
+ * 自己回来」的语义只对**已经开着**的人成立 —— 没开过的人，第一次开窗仍然是一次
+ * 用户手势（控制栏按钮 / 设置面板开关）。
  *
  * 但「窗口消失」这件事不归我们管：规范允许 UA 自行关闭 PiP 窗口
  * （Document PiP §5 步骤 9 / §6.4），opener 文档被销毁或导航时更是强制关闭
@@ -25,7 +30,7 @@
  *
  * 所以我们不去阻止关闭（阻止不了），而是把「窗口消失」一律当成**中间态**：
  *
- *   enabled（落盘，默认 true）= 用户希望它开着。**写入口只有两处**：
+ *   enabled（落盘，默认 false）= 用户希望它开着。**写入口只有两处**：
  *   open() 写 true，close() 写 false（close 只由控制栏按钮 / 设置面板开关触发）。
  *
  *   pagehide 时：只要不是我们自己的 close()（closingByUs），且 enabled 还是 true，
@@ -34,14 +39,14 @@
  *   为什么不区分「谁关的」：用户点 X 与文档卸载（刷新 / 导航）在 pagehide 里
  *   **区分不了**（刷新时 document.visibilityState 仍是 'visible'）。早期版本按
  *   「疑似点 X 就当用户不要了」处理并落盘 enabled = false，结果是**每次刷新都会把
- *   「默认开启」关掉**，只能再手点按钮才能回来。既然关闭权只归按钮，这个区分就没有
+ *   用户的开关关掉**，只能再手点按钮才能回来。既然关闭权只归按钮，这个区分就没有
  *   存在的意义了（对应地，isInvoluntaryClose()/lastVisibleAt 那一套也一并删掉）。
  *
  * 「立刻弄回来」不一定成功：requestWindow() 必须在瞬时用户激活内调用。
  * 所以恢复是「**有激活才试**」：
  *   有激活（用户正点着页面）→ 试一次；被拒就 arm() 一个一次性手势监听
  *   没激活（刷新 / 真导航 / 系统悄悄收走窗口）→ **连试都不试**，直接 arm()
- * 用户下一次点击/按键时打开（默认开启就是靠这条路径生效的）。没激活还去调
+ * 用户下一次点击/按键时打开（「开了就一直开着」就是靠这条路径生效的）。没激活还去调
  * requestWindow() 只会换来一条 'Document PiP requires user activation' 的红字，
  * 让用户以为功能坏了 —— 见 open() 里的 hasActivation()。
  *
@@ -86,7 +91,7 @@
   const LABEL_IDLE = '桌面字幕';
   const LABEL_ON = '关闭桌面字幕';
   const LABEL_UNSUPPORTED = '当前浏览器不支持桌面字幕';
-  const HEARTBEAT_MS = 1000;
+  // 心跳间隔不在这里定义：定时器由 00-shared.js 的共享心跳统一驱动（1s，见文件末尾）
 
   const PIP_WIDTH = 1000;
   /** 比只放两行字幕时高一些：底部留出播放控制栏（见 PIP_BASE_CSS 的 #bar） */
@@ -105,7 +110,7 @@
   /** 只在播放/暂停/倍速变化时重画控制栏，这几个事件类型就够了 */
   const VIDEO_STATE_EVENTS = ['play', 'pause', 'ratechange'];
 
-  /** 常驻开关的落盘键。默认 true —— 用户没表过态时就是要开着 */
+  /** 常驻开关的落盘键。默认 false —— 用户没表过态时只显示画面内那层官方字幕 */
   const STORE_KEY = 'llgPip';
 
   /** 触发「下一次手势就开」的事件。pointerdown 覆盖鼠标/触摸，keydown 覆盖键盘用户 */
@@ -522,12 +527,20 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let pipWin = null;
   let rafId = 0;
   let lastKey = '';
+  /** 上一次写进进度条的百分比（先比对再写，见 pushProgress） */
+  let lastFill = '';
   /** PiP 里那张 <style>（窗口重建时换引用，关窗时清掉） */
   let styleEl = null;
   /** 当前生效的外观（官方设置的投影，见「原生外观」一节） */
   let appearance = { ...DEFAULT_APPEARANCE };
-  /** 常驻开关（落盘）。true = 希望它开着 */
-  let enabled = true;
+  /**
+   * 常驻开关（落盘）。true = 希望它开着。
+   *
+   * **默认 false**（PLAN 025）：用户选择「视频内嵌字幕优先」—— 官方那层字幕本来就在
+   * 画面里显示（还能点词查词），没表过态时不该再自动多弹一扇系统窗口。落盘里
+   * `enabled: true`（也就是关掉之前一直在用的）的人不受影响，照旧自己开回来。
+   */
+  let enabled = false;
   /** 待开的一次性手势监听器（armed 非空即已挂上） */
   let armed = null;
   /** 防止 pointerdown 的预开与随后的 click 各开一次 */
@@ -575,7 +588,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
    * 把本地状态跟浏览器对齐：窗口已经不在时清干净（stop()），返回「此刻是否真有窗口」。
    *
    * ⚠️ 校准**只清状态，绝不写 enabled** ——「谁关的」（用户点 X / 浏览器收走 /
-   * 文档卸载）在这里同样分不清，写下去就会把「默认开启」搞丢（见 save() 的注释）。
+   * 文档卸载）在这里同样分不清，写下去就会把用户的开关搞丢（见 save() 的注释）。
    */
   function syncWindow() {
     if (pipWin && !liveWindow()) stop();
@@ -791,9 +804,16 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     setText(d.getElementById('line-secondary'), secondary);
   }
 
+  /**
+   * 进度条的宽度。先比对再写：本函数由 PiP 窗口自己的 rAF 每帧调用，而字幕的句内
+   * 进度在 60fps 下必然大量重复（同一毫秒的百分比一样）—— 无谓的样式写入会白白
+   * 让合成器重绘（AGENTS.md §3 的幂等规矩同样适用于这里）。
+   */
   function pushProgress() {
     if (!pipWin) return;
     const percent = `${track.getProgress() * 100}%`;
+    if (percent === lastFill) return;
+    lastFill = percent;
     const d = pipWin.document;
     const f1 = d.getElementById('fill-primary');
     const f2 = d.getElementById('fill-secondary');
@@ -974,7 +994,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
    *
    * ⚠️ `enabled` 的写入口**只有两个**：`open()`（写 true）与 `close()`（写 false）。
    * **不要在 PiP 窗口的 pagehide 里写盘** —— 那里分不清「用户点了 X」与「文档卸载
-   * （刷新 / 导航）」，写下去就会把默认开启搞丢（用户报的正是这个，见文件头与
+   * （刷新 / 导航）」，写下去就会把用户的开关搞丢（用户报的正是这个，见文件头与
    * handlePageHide 的注释）。
    */
   function save() {
@@ -1022,7 +1042,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
    * 是的话，开/关这件事归那个按钮自己的 click 处理器（控制栏按钮的 onClick、
    * 设置面板开关的 toggle）：arm() 若在 pointerdown 阶段抢先 open()，随后到达的
    * click 会看到「已经开着」，于是把它关掉 —— 用户看到的是「点了打不开」，而且
-   * close() 会把 enabled 落盘成 false，把「默认开启」一起搞丢。
+   * close() 会把 enabled 落盘成 false，把用户开过的开关一起搞丢。
    *
    * 判据用 composedPath() 而不是 target：设置面板的开关在 Linglass 的 shadowRoot
    * 里，事件冒到 document 时 target 已被重定向成宿主元素，只有 composedPath()
@@ -1053,7 +1073,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   /**
    * 武装「下一次用户手势就开」。
    * requestWindow() 必须在瞬时用户激活内调用，所以在没有手势的时机（心跳里发现窗口没了、
-   * 页面刚加载）只能这样等 —— 「默认开启」正是靠这条路径生效。
+   * 页面刚加载）只能这样等 —— 「开着就一直开着」正是靠这条路径生效。
    */
   function arm() {
     // syncWindow() 而不是 `pipWin`：窗口被浏览器收走而本地还以为它在时，用 `pipWin`
@@ -1084,7 +1104,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
     // 没有瞬时激活就别去撞 requestWindow()：必然被拒，还会往控制台刷一条红字。
     // 这条路径是常态（刷新 / 真导航 / 回到浏览器本体 / 心跳里的兜底），不是异常，
-    // 所以静默地等下一次手势 —— 那才是「默认开启」真正的生效路径。
+    // 所以静默地等下一次手势 —— 那才是「开着就一直开着」真正的生效路径。
     // 注意这一判要在 disarm() 之前：重入已被上面两道守卫挡掉，这里不改任何状态。
     if (!hasActivation()) {
       arm();
@@ -1146,6 +1166,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     pipWin = null;
     styleEl = null; // 那张 <style> 随窗口一起没了
     lastKey = '';
+    lastFill = '';  // 新窗口的填充条是从 0 开始的，别被上一扇窗的值挡住第一次写
     refreshButton();
   }
 
@@ -1362,7 +1383,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   shared.registerFeature({
     id: 'desktopSubtitles',
     title: '桌面字幕浮窗',
-    desc: '默认开启，而且只有这里的开关或控制栏按钮能关掉它；点浮窗自己的 X、切后台、刷新页面都会让它自己回来',
+    desc: '默认关闭（画面里那层官方字幕优先）。打开后只有这里的开关或控制栏按钮能关掉它；点浮窗自己的 X、切后台、刷新页面都会让它自己回来',
     icon: `
 <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1420,5 +1441,6 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     console.info('[桌面字幕] 清理了扩展重载遗留的画中画窗口');
   }
 
-  setInterval(heartbeat, HEARTBEAT_MS);
+  // 心跳挂在 00-shared.js 的共享定时器上（PLAN 025）：整页只留一个 1s 定时器
+  shared.onTick(heartbeat);
 })();

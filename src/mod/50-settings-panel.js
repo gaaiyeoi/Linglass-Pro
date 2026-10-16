@@ -43,7 +43,7 @@
   const HOST_ID = 'linglass-settings-panel-v2';
   const ROOT_PAGE = '.panel-content.panel-page[data-page="root"]';
   const ATTR = 'data-llg-mod';
-  const HEARTBEAT_MS = 1000;
+  // 心跳间隔不在这里定义：定时器由 00-shared.js 的共享心跳统一驱动（1s，见文件末尾）
   const SECTION_TITLE = 'Linglass-Pro';
 
   /**
@@ -223,5 +223,6 @@
   }
 
   heartbeat();
-  setInterval(heartbeat, HEARTBEAT_MS);
+  // 定时器挂在 00-shared.js 的共享心跳上（PLAN 025）：整页只留一个 1s 定时器
+  shared.onTick(heartbeat);
 })();

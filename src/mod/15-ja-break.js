@@ -45,8 +45,9 @@
   const STYLE_ID = 'llg-jabreak-style';
   const STORE_KEY = 'llgJaBreak';
 
-  /** 兜底心跳：官方换了这一行的 DOM 之后，MutationObserver 未必每次都叫得动 */
-  const HEARTBEAT_MS = 1000;
+  // 兜底心跳（官方换了这一行的 DOM 之后，MutationObserver 未必每次都叫得动）
+  // 不再自己 setInterval —— 见文件末尾 shared.onTick(refresh)，与其余四个模块共用
+  // 同一个 1s 定时器（PLAN 025）。
 
   /** 分隔符。改这里就会同步进下面 CSS 的 ::after content */
   const SEPARATOR = '|';
@@ -290,6 +291,7 @@
       refresh();
     });
 
-  // 官方换视频 / 重建播放器时，行的 DOM 会被整个换掉，靠心跳兜底重新注入
-  setInterval(refresh, HEARTBEAT_MS);
+  // 官方换视频 / 重建播放器时，行的 DOM 会被整个换掉，靠心跳兜底重新注入。
+  // 定时器挂在 00-shared.js 的共享心跳上（PLAN 025）：一个页面只需要一个 1s 定时器
+  shared.onTick(refresh);
 })();
