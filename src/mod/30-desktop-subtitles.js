@@ -12,7 +12,8 @@
  *   文案 —— 直接读 Linglass 的 Shadow DOM（实时、永远最新）
  *   进度 —— 10-subtitle-track.js 记录的句子时间轴，句内线性插值
  *   原文行的文节分隔符 —— 复用 15-ja-break.js 的开关与 05-ja-segment.js 的切分结果
- *   外观 —— 照搬官方「外观」设置（样式 / 字号 / 颜色 / 双语），见下面的「原生外观」一节
+ *   外观 —— 浮窗自己一套（可在浮窗的样式条上直接调样式 / 字号 / 颜色 / 双语），
+ *           见下面的「浮窗外观」一节；首次打开时从官方外观页拷一份当初始值
  *
  * ── 常驻语义（本文件最容易被改坏的部分，先读这段）──
  *
@@ -93,9 +94,26 @@
   const LABEL_UNSUPPORTED = '当前浏览器不支持桌面字幕';
   // 心跳间隔不在这里定义：定时器由 00-shared.js 的共享心跳统一驱动（1s，见文件末尾）
 
-  const PIP_WIDTH = 1000;
-  /** 比只放两行字幕时高一些：底部留出播放控制栏（见 PIP_BASE_CSS 的 #bar） */
-  const PIP_HEIGHT = 264;
+  /**
+   * 浮窗打开时的默认宽度。
+   *
+   * 取「一行放得下常见字幕」的紧凑值，而不是 1000 —— 字幕在窗口里居中，写死 1000 时
+   * 两侧各留几百像素黑边，对读字幕没有任何帮助。文本长度事先不知道，所以不按文本算：
+   * 长句会换行，由 #stage 居中承载（窗口之后仍可自由拖动，见 PIP_BASE_CSS 的说明）。
+   */
+  const PIP_WIDTH = 700;
+  /** 控制栏高度（按钮 30 + 上下内边距 8/10，与 PIP_BASE_CSS 的 #bar 一致） */
+  const BAR_HEIGHT = 48;
+  /** #stage 的上内边距（与 PIP_BASE_CSS 一致） */
+  const STAGE_PAD_TOP = 8;
+  /** 字幕行的 line-height（与 PIP_BASE_CSS 的 #line-* 一致） */
+  const LINE_HEIGHT = 1.3;
+  /**
+   * 高度余量：原文行带注音时 line-height 会从 1.3 变 1.7（`#line-primary:has(ruby)`），
+   * 而「当前这句有没有注音」在开窗那一刻还不知道。留一段固定余量兜住它：没注音时
+   * 它变成上下各几个像素的呼吸位，有注音时正好不被裁。
+   */
+  const PIP_HEIGHT_SLACK = 12;
 
   /**
    * 倍速循环按钮的档位（见 command('rate')）。
@@ -121,12 +139,19 @@
   /** 浮窗里分隔符节点的 class（样式见 pipCss：与视频内那套同一份观感） */
   const SEP_CLASS = 'llg-sep';
 
-  // ---------------------------------------------------------------- 原生外观
+  // ---------------------------------------------------------------- 浮窗外观
   //
-  // 浮窗的排版照搬官方字幕：字体栈、字重、字号、颜色、底板、阴影/描边全部来自官方
-  // 「外观」设置页（样式 / 字号 / 颜色 / 双语）—— 用户在那边改，浮窗跟着变。
+  // 浮窗的排版**规则**照搬官方字幕：字体栈、字重、字号比例、颜色、底板、阴影/描边用的都是
+  // 官方那套公式（出处见本段末尾）。但**取值从哪来**在 PLAN 027 起变了：
   //
-  // 读法与官方一致：chrome.storage.sync['linglass-settings']。官方用 zustand persist
+  //   样式 / 字号 / 颜色 / 双语 —— 浮窗自己一套，落盘在 chrome.storage.local 的
+  //                               APPEARANCE_KEY 里，在浮窗的样式条上直接调（见「样式条」
+  //                               一节）。**首次打开时**从官方外观页拷一份当初始值，
+  //                               此后官方那边怎么改都与浮窗无关 —— 这是用户明确要的。
+  //   学习语言 / 母语           —— 仍然跟随官方：换了语言，字体栈与 CJK 的字号比例必须
+  //                               跟着换，否则浮窗会拿错字面。语言是内容属性，不是外观。
+  //
+  // 官方设置的读法：chrome.storage.sync['linglass-settings']，官方用 zustand persist
   // 落盘，值是对象还是 JSON 字符串两种形态都出现过，所以两种都兜。
   //
   // 与官方唯一的偏差：**字号不乘播放器高度**。官方是
@@ -135,13 +160,48 @@
   // 而用户要的是「设置是多少就是多少」，所以这里只取官方的基座 24px 乘档位：
   // 浮窗拉大拉小、播放器进全屏，字号都不动。
   //
-  // 取值出处（vendor/linglass-1.12.3/assets/，官方一发版文件哈希就变，只记名字前缀）：
+  // 取值出处（vendor/linglass-1.12.4/assets/，官方一发版文件哈希就变，只记名字前缀）：
   //   settings-*.js    默认设置 pe、预设表 f、字号 Se()、阴影/描边 re() 与 R()、色板
   //   promoCards-*.js  落盘读取、译文行的 adjustColorOpacity()、底板用色 primaryBgColor
   //                    （默认 #000000，官方外观页里能换的是**文字**颜色）
+  //
+  // 1.12.3 → 1.12.4 于 PLAN 027 核对过：settings-*.js 两版同哈希（预设表/Se()/re() 未变）；
+  // promoCards 换了哈希，但 plate 梯度 / hexToRGBA / secondaryAlpha 那套一致；
+  // subtitleBackground 已降级为派生字段（官方原话：plate is one property of a preset now,
+  // not a switch of its own），所以浮窗不读它是对的。
 
   /** 官方外观设置的落盘键（chrome.storage.sync） */
   const SETTINGS_KEY = 'linglass-settings';
+
+  /**
+   * 浮窗自己的外观落盘键（chrome.storage.local）。
+   *
+   * 与同样在 local 里的 `llgPip`（常驻开关）并列，互不相干。值是**完整的四项**：
+   * 因为完全独立之后，缺项没法再去官方那边补 —— 所以首次播种时就写全。
+   */
+  const APPEARANCE_KEY = 'llgPipAppearance';
+
+  /** 浮窗自己的字号档位（与官方同一套：50–150、step 10，省得用户学两套） */
+  const SCALE_MIN = 50;
+  const SCALE_MAX = 150;
+  const SCALE_STEP = 10;
+
+  /** 样式条上能选的四个预设：顺序就是按钮顺序 */
+  const STYLE_CHOICES = ['classic', 'cinema', 'comic', 'contrast'];
+
+  /** 预设的中文短标签（样式条上一个按钮一个） */
+  const STYLE_LABELS = {
+    classic: '经典',
+    cinema: '影院',
+    comic: '漫画',
+    contrast: '对比',
+  };
+
+  /** 官方色板：浮窗只给这四档，不做自定义取色器（PLAN 027 的「不做什么」） */
+  const COLOR_PRESETS = ['#FFFFFF', '#FFD60A', '#64D2FF', '#30D158'];
+
+  /** #RRGGBB（落盘里的颜色要过这一关才用） */
+  const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
   /** 官方 f.classic.font 等字体栈 */
   const FONT_SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -185,6 +245,62 @@
     primaryLang: null,
     secondaryLang: null,
   };
+
+  /** 字号夹到档位表上：落盘被写坏、或以后改档位表时都从这里兜住 */
+  function clampScale(value) {
+    const onStep = Math.round(value / SCALE_STEP) * SCALE_STEP;
+    return Math.min(SCALE_MAX, Math.max(SCALE_MIN, onStep));
+  }
+
+  /** 样式条上的字号加减：按档位表走，夹在首尾档 */
+  function stepScale(scale, dir) {
+    return clampScale(clampScale(scale) + dir * SCALE_STEP);
+  }
+
+  /** 完整外观 → 浮窗自己持有的那四项（不带语言，语言跟随官方，见 composeAppearance） */
+  function ownOf(settings) {
+    return {
+      style: settings.style,
+      scale: settings.scale,
+      color: settings.color,
+      dual: settings.dual,
+    };
+  }
+
+  /**
+   * 落盘值 → 浮窗自己的四项外观。
+   *
+   * 逐项校验、逐项兜底（一项脏数据不该让其余三项跟着回退）；整个值读不成、
+   * 或压根没存过（首次打开）→ 返回 null，由调用方拿官方当前值播种。
+   */
+  function parseOwn(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    return {
+      style: STYLE_CHOICES.includes(raw.style) ? raw.style : DEFAULT_APPEARANCE.style,
+      scale: Number.isFinite(raw.scale)
+        ? clampScale(raw.scale)
+        : DEFAULT_APPEARANCE.scale,
+      color: typeof raw.color === 'string' && HEX_COLOR.test(raw.color)
+        ? raw.color.toUpperCase()
+        : DEFAULT_APPEARANCE.color,
+      dual: typeof raw.dual === 'boolean' ? raw.dual : DEFAULT_APPEARANCE.dual,
+    };
+  }
+
+  /** 浮窗自己的四项外观 + 跟随官方的语言 → pipCss() / pushText() 用的完整外观 */
+  function composeAppearance(own, langs) {
+    return { ...own, primaryLang: langs.primaryLang, secondaryLang: langs.secondaryLang };
+  }
+
+  /**
+   * 官方外观 → 浮窗的初始值。
+   *
+   * 刻意**过一遍 parseOwn**：官方那份也可能被写坏（未知预设名、档位缺失、颜色乱填），
+   * 播种时就走同一道校验，免得把脏值当成「用户选定的外观」落盘存下来。
+   */
+  function seedFrom(official) {
+    return parseOwn(ownOf(official));
+  }
 
   /**
    * 官方四套预设（settings-*.js 的 f），字段名照抄，便于以后与官方对照：
@@ -304,6 +420,35 @@
     };
   }
 
+  /**
+   * 开窗时的默认高度 = 内容高度（字幕两行 + 底板内边距 + 控制栏 + 余量）。
+   *
+   * 为什么不写死一个数：字号**不跟窗口走**（见 fontSizeOf），而官方档位能拉到 150%
+   * 以上 —— 写死 264 时 100% 档上下各留一大块黑边，档位一调大又反过来裁字。
+   * 按当前外观现算，开窗那一刻就是贴合的；档位之后改了，用户把窗口拖一下即可
+   * （窗口本来就可自由拉伸）。
+   */
+  function pipHeight(target) {
+    const size = fontSizeOf(target);
+    const spec = styleSpecOf(target.style);
+    const scale = size.base / BASE_FONT_PX;
+
+    let inner = size.primary * LINE_HEIGHT;
+    if (target.dual) inner += size.secondary * LINE_HEIGHT;
+
+    if (spec.plate === 'block') {
+      // classic：整块底板，上下各一份内边距（按 metricScale 缩放）
+      inner += 2 * PLATE_PAD_Y * scale;
+    } else {
+      // contrast：逐行底板，每行各有上下内边距，两行之间还有一段间距
+      const padY = LINE_PAD_Y * size.base;
+      inner += 2 * padY;
+      if (target.dual) inner += 2 * padY + LINE_GAP * size.base;
+    }
+
+    return Math.ceil(BAR_HEIGHT + STAGE_PAD_TOP + inner + PIP_HEIGHT_SLACK);
+  }
+
   /** 官方 ie()：原文语言是 CJK 时加粗一档 */
   function primaryWeightOf(spec, target) {
     return isCJK(target.primaryLang)
@@ -386,15 +531,26 @@
     return '';
   }
 
-  /** 与外观无关的部分：结构、进度条、控制栏。字号一律写死 px，不跟浮窗尺寸走 */
+  /**
+   * 与外观无关的部分：结构、进度条、控制栏。字号一律写死 px，不跟浮窗尺寸走。
+   *
+   * ⚠️ 这里**不能出现任何固有最小尺寸**：Document PiP 窗口能被用户拖到多小，取决于
+   * 文档内容的 min-content —— flex 子项默认 `min-width: auto`，会被内容撑住，于是
+   * 「窗口只能拉大、拖不小」。所以以下几件事是刻意的，别改回去：
+   *   · 链条上每一环（#box / #stage / .kline / #plate / #bar）都写 `min-width: 0`；
+   *   · 控制栏按钮不再写死 `min-width: 42px`（六个按钮 + 间距会把窗口钉在 300px 以上），
+   *     改成可收缩（`flex: 0 1 auto` + `min-width: 0`），窄窗口下按钮一起变窄；
+   *   · 外围 padding / gap 取小值，不给「窗口下限」再抬一层。
+   * 唯一不跟着窗口走的是**字号**（见 fontSizeOf 与本节顶部说明）：窗口怎么拉都是那个字号。
+   */
   const PIP_BASE_CSS = `
 :root { color-scheme: dark; }
 html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   -webkit-font-smoothing: antialiased; }
-#box { height: 100%; display: flex; flex-direction: column; box-sizing: border-box; }
-#stage { flex: 1; min-height: 0; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; padding: 10px 34px 0; gap: 8px; }
-.kline { position: relative; display: inline-block; max-width: 100%; }
+#box { height: 100%; min-width: 0; display: flex; flex-direction: column; box-sizing: border-box; }
+#stage { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; padding: 8px 16px 0; gap: 8px; }
+.kline { position: relative; display: inline-block; max-width: 100%; min-width: 0; }
 .kfill { position: absolute; left: 0; top: 0; bottom: 0; width: 0;
   border-radius: var(--radius-sm, 8px); }
 /* 填充是「读字时的背景」，不是装饰：官方 classic 底板本来就是 rgba(0,0,0,.8) 的深底，
@@ -409,20 +565,44 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
 /* 播放控制栏：浮窗自己的按钮，直接操作宿主页面里的 video（同源）。
    字体栈是给控制栏用的 —— 字幕行不再继承它（那两行完全按官方外观走） */
-#bar { display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 8px 12px 10px;
+#bar { display: flex; align-items: center; justify-content: center; gap: 4px;
+  min-width: 0; padding: 8px 6px 10px;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
-#bar button { min-width: 42px; height: 30px; padding: 0 10px;
+/* min-width 必须是 0：写死按钮宽度等于给窗口设下限（见本节顶部说明）。
+   窄窗口下按钮一起收窄，文字用 nowrap 保证不折行 */
+#bar button { flex: 0 1 auto; min-width: 0; height: 30px; padding: 0 6px;
   border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
   background: rgba(255,255,255,.08); color: #fff;
-  font: inherit; font-size: 13px; line-height: 1; cursor: pointer;
+  font: inherit; font-size: 13px; line-height: 1; white-space: nowrap; cursor: pointer;
   transition: background .15s ease; }
 #bar button:hover { background: rgba(255,255,255,.18); }
 #bar button:active { background: rgba(255,255,255,.26); }
 #bar button[disabled] { opacity: .32; cursor: default; }
 #bar button[disabled]:hover { background: rgba(255,255,255,.08); }
-#pip-toggle { min-width: 54px; font-size: 15px; }
+#pip-toggle { font-size: 15px; }
 #pip-rate { font-variant-numeric: tabular-nums; }
+
+/* 样式条（PLAN 027）：与控制栏是同一行的两种形态，切换只改 display ——
+   既不给浮窗加高度，也不遮住字幕。所以间距 / 内边距与控制栏保持一致。
+   按钮的声明与控制栏刻意各写一份：控制栏那条规则的形态被既有用例钉着，别去动它。 */
+#bars { flex: 0 0 auto; min-width: 0; }
+#stylebar { display: flex; align-items: center; justify-content: center; gap: 4px;
+  min-width: 0; padding: 8px 6px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+#stylebar button { flex: 0 1 auto; min-width: 0; height: 30px; padding: 0 6px;
+  border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
+  background: rgba(255,255,255,.08); color: #fff;
+  font: inherit; font-size: 13px; line-height: 1; white-space: nowrap; cursor: pointer;
+  transition: background .15s ease; }
+#stylebar button:hover { background: rgba(255,255,255,.18); }
+#stylebar button:active { background: rgba(255,255,255,.26); }
+/* 选中态：只用 data-on 这一个标记（真 DOM 与测试桩上都读得到） */
+#stylebar button[data-on] { background: rgba(10, 132, 255, .38);
+  border-color: rgba(10, 132, 255, .66); }
+/* 色块：圆形，颜色由内联 style.background 给（官方四档色板） */
+#stylebar .swatch { width: 26px; padding: 0; border-radius: 50%; }
+#scale-val { min-width: 4ch; text-align: center; font-size: 13px; color: #d0d0d6;
+  font-variant-numeric: tabular-nums; }
 `;
 
   /**
@@ -440,7 +620,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
     return [PIP_BASE_CSS, plateCss(spec, size.base), `
 #plate { display: flex; flex-direction: column; align-items: center;
-  box-sizing: border-box; max-width: 100%; }
+  box-sizing: border-box; max-width: 100%; min-width: 0; }
 #line-primary { font-family: ${fontStackOf(spec, target.primaryLang)};
   font-size: ${round1(size.primary)}px; font-weight: ${primaryWeightOf(spec, target)};
   letter-spacing: ${letterSpacing}; color: ${target.color};
@@ -503,16 +683,102 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     pushText();
   }
 
-  /** 读一次官方外观设置。storage 不可用（被裁剪的包）时保持默认值即可 */
-  function loadAppearance() {
+  /** 把浮窗自己的四项外观落盘（storage 不可用时内存里的那份仍然有效） */
+  function saveAppearance() {
+    try {
+      chrome.storage.local.set({ [APPEARANCE_KEY]: { ...own } }).catch(() => {});
+    } catch {
+      // 没有 storage：只在本次会话里有效
+    }
+  }
+
+  /** 读 chrome.storage.local 的一个键；storage 不可用（被裁剪的包）时给 undefined */
+  function readLocal(key) {
+    try {
+      return chrome.storage.local
+        .get(key)
+        .then((res) => (res ? res[key] : undefined))
+        .catch(() => undefined);
+    } catch {
+      return Promise.resolve(undefined);
+    }
+  }
+
+  /** 读官方外观设置（chrome.storage.sync）；读不到就给 undefined，由 parseSettings 兜默认值 */
+  function readOfficial() {
     try {
       return chrome.storage.sync
         .get(SETTINGS_KEY)
-        .then((res) => applyAppearance(parseSettings(res && res[SETTINGS_KEY])))
-        .catch(() => {});
+        .then((res) => (res ? res[SETTINGS_KEY] : undefined))
+        .catch(() => undefined);
     } catch {
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     }
+  }
+
+  /**
+   * 把一份浮窗外观落盘并立刻生效。**样式条上的每一次调整都走这里**（唯一写入口）。
+   */
+  function applyOwn(next) {
+    own = next;
+    applyAppearance(composeAppearance(own, langs));
+    saveAppearance();
+  }
+
+  /** 改其中几项（样式条用）：合进当前值后落盘 + 生效 + 回显 */
+  function setOwn(patch) {
+    applyOwn({ ...own, ...patch });
+    syncStyleBar();
+  }
+
+  /**
+   * 复位：把官方**此刻**的外观重新拷一份当浮窗的样式。
+   *
+   * 这是「浮窗不听官方面板」之后唯一还能把官方那套请回来的入口 —— 语义从「清掉覆盖」
+   * 变成「重新播种」（PLAN 027 的完全独立口径）。
+   */
+  function resetAppearance() {
+    setOwn(seedFrom(officialAppearance));
+  }
+
+  /**
+   * 官方设置变了：**只取语言**。
+   *
+   * 样式 / 字号 / 颜色 / 双语从 PLAN 027 起由浮窗自己说了算 —— 官方那边再改都不动，
+   * 这是用户明确要的（「首次拷一份官方设置当初始值，此后浮窗彻底不听官方面板」）。
+   * 语言是唯一例外：换了学习语言，字体栈与 CJK 的字号比例都必须跟着换，
+   * 否则浮窗会拿错字面 —— 语言是内容属性，不是外观。
+   */
+  function applyOfficialAppearance(official) {
+    officialAppearance = official;
+    const next = { primaryLang: official.primaryLang, secondaryLang: official.secondaryLang };
+    if (next.primaryLang === langs.primaryLang && next.secondaryLang === langs.secondaryLang) {
+      return;
+    }
+    langs = next;
+    applyAppearance(composeAppearance(own, langs));
+  }
+
+  /**
+   * 启动时读一次：浮窗自己的四项外观 + 跟随官方的语言。
+   *
+   * **只有「落盘里没有」那一次才去看官方外观页**，把当前值拷过来当初值并立刻落盘。
+   * 之后官方怎么改都与浮窗无关（语言除外，见 applyOfficialAppearance）。
+   */
+  function loadAppearance() {
+    return Promise.all([readLocal(APPEARANCE_KEY), readOfficial()]).then(([rawOwn, rawOfficial]) => {
+      const official = parseSettings(rawOfficial);
+      officialAppearance = official;
+      langs = { primaryLang: official.primaryLang, secondaryLang: official.secondaryLang };
+
+      const stored = parseOwn(rawOwn);
+      if (stored) {
+        own = stored;
+        applyAppearance(composeAppearance(own, langs));
+        return;
+      }
+      applyOwn(seedFrom(official)); // 首次：拿官方当前值播种（顺便落盘，见 applyOwn）
+    });
   }
 
   const ICON_SVG = `
@@ -531,8 +797,21 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   let lastFill = '';
   /** PiP 里那张 <style>（窗口重建时换引用，关窗时清掉） */
   let styleEl = null;
-  /** 当前生效的外观（官方设置的投影，见「原生外观」一节） */
+  /** 当前生效的外观 = 浮窗自己的四项 + 跟随官方的语言（见 composeAppearance） */
   let appearance = { ...DEFAULT_APPEARANCE };
+  /** 浮窗自己持有的四项外观（落盘的唯一真相，见「浮窗外观」一节） */
+  let own = ownOf(DEFAULT_APPEARANCE);
+  /** 跟随官方的语言（学习语言 / 母语） */
+  let langs = { primaryLang: null, secondaryLang: null };
+  /** 最近一次读到的官方外观：只用于语言跟随与复位时的「重新播种」 */
+  let officialAppearance = { ...DEFAULT_APPEARANCE };
+  /** 样式条当前是显示着（'style'）还是收起（'play'） */
+  let barMode = 'play';
+  /**
+   * 样式条上需要回显的节点（窗口重建时整份换掉）。
+   * 直接存引用而不是 querySelector：桩件里没有选择器引擎，而且样式条是我们自己造的。
+   */
+  let styleNodes = null;
   /**
    * 常驻开关（落盘）。true = 希望它开着。
    *
@@ -867,10 +1146,58 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
   }
 
   /**
-   * 执行一个浮窗控制动作。返回 false 表示没有 video / 未知动作（调用方据此不做状态回显）。
+   * 样式条上的动作。返回 false 表示「这不是样式动作」，交给下面的播放控制处理。
+   *
+   * 放在 video 那道闸门**之前**：调字号 / 换颜色跟播放器没关系，不该因为
+   * 此刻取不到 video 就点不动（浮窗是系统窗口，它可以比 video 活得久）。
+   */
+  function appearanceCommand(act) {
+    switch (act) {
+      case 'appearance':
+        setBarMode(barMode === 'style' ? 'play' : 'style');
+        return true;
+      case 'scale-':
+        setOwn({ scale: stepScale(own.scale, -1) });
+        return true;
+      case 'scale+':
+        setOwn({ scale: stepScale(own.scale, 1) });
+        return true;
+      case 'dual':
+        setOwn({ dual: !own.dual });
+        return true;
+      case 'reset':
+        resetAppearance();
+        syncStyleBar();
+        return true;
+      default:
+        break;
+    }
+
+    // style:<名字> / color:<#RRGGBB>：值必须是我们认得的，脏值一律不打进落盘
+    if (act.startsWith('style:')) {
+      const name = act.slice('style:'.length);
+      if (!STYLE_CHOICES.includes(name)) return false;
+      setOwn({ style: name });
+      return true;
+    }
+    if (act.startsWith('color:')) {
+      const hex = act.slice('color:'.length).toUpperCase();
+      if (!COLOR_PRESETS.includes(hex)) return false;
+      setOwn({ color: hex });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 执行一个浮窗动作。返回 false 表示没有 video / 未知动作（调用方据此不做状态回显）。
    * @param {string} act toggle | back | fwd | prev | next | rate
+   *                     | appearance | scale- | scale+ | dual | reset
+   *                     | style:<预设> | color:<#RRGGBB>
    */
   function command(act) {
+    if (appearanceCommand(act)) return true;
+
     const el = video();
     if (!el) return false;
 
@@ -938,6 +1265,91 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       || (index === 0 && !!el && el.currentTime - cues[0].start > RESTART_CUE_AFTER);
     setDisabled(d.getElementById('pip-prev'), !canPrev);
     setDisabled(d.getElementById('pip-next'), cues.length === 0 || index >= cues.length - 1);
+
+    // 样式条上的回显跟控制栏同一拍（心跳里也会走到这里）
+    syncStyleBar();
+  }
+
+  // ---------------------------------------------------------------- 样式条（PLAN 027）
+  //
+  // 浮窗自己的一套外观调整：字号 / 预设 / 颜色 / 双语 / 复位。形态上复用控制栏那一条 ——
+  // 切换只改 display，所以浮窗高度不变、字幕也不会被遮住（比弹出浮层或 resize 系统窗口稳）。
+
+  /** 显示 / 隐藏一个节点（先比较再写：心跳每秒都会走到这里） */
+  function show(el, visible) {
+    if (!el) return;
+    const next = visible ? '' : 'none';
+    if (el.style.display !== next) el.style.display = next;
+  }
+
+  /** 选中态标记：真 DOM 与测试桩上都读得到的一个属性 */
+  function markOn(el, on) {
+    if (!el) return;
+    if (on) el.dataset.on = '1';
+    else delete el.dataset.on;
+  }
+
+  /** 在控制栏与样式条之间切换（只切 display，不改布局高度） */
+  function setBarMode(mode) {
+    barMode = mode === 'style' ? 'style' : 'play';
+    if (!pipWin) return;
+    const d = pipWin.document;
+    show(d.getElementById('bar'), barMode === 'play');
+    show(d.getElementById('stylebar'), barMode === 'style');
+    if (barMode === 'style') syncStyleBar();
+  }
+
+  /** 样式条的回显：档位数字、选中的预设与色块、双语按钮的开启态 */
+  function syncStyleBar() {
+    if (!pipWin || !styleNodes) return;
+    setText(styleNodes.value, `${own.scale}%`);
+    for (const [name, btn] of styleNodes.presets) markOn(btn, own.style === name);
+    for (const [hex, btn] of styleNodes.colors) markOn(btn, own.color === hex);
+    markOn(styleNodes.dual, own.dual);
+  }
+
+  /** 样式条的按钮：act 就是 command() 认的动作串；id 只为测试与 probe 能按名字取到它 */
+  function buildStyleBar(d) {
+    const bar = d.createElement('div');
+    bar.id = 'stylebar';
+    const nodes = { value: null, presets: new Map(), colors: new Map(), dual: null };
+
+    const add = (act, glyph, label, id) => {
+      const btn = d.createElement('button');
+      btn.type = 'button';
+      btn.dataset.act = act;
+      btn.textContent = glyph;
+      btn.setAttribute('aria-label', label);
+      btn.title = label;
+      if (id) btn.id = id;
+      bar.append(btn);
+      return btn;
+    };
+
+    add('scale-', 'A−', '字号调小', 'pip-scale-down');
+    const value = d.createElement('span');
+    value.id = 'scale-val';
+    nodes.value = value;
+    bar.append(value);
+    add('scale+', 'A+', '字号调大', 'pip-scale-up');
+
+    for (const name of STYLE_CHOICES) {
+      const label = STYLE_LABELS[name] || name;
+      nodes.presets.set(name, add(`style:${name}`, label, `样式：${label}`, `pip-style-${name}`));
+    }
+
+    for (const hex of COLOR_PRESETS) {
+      const btn = add(`color:${hex}`, '', `字幕颜色 ${hex}`, `pip-color-${hex.slice(1)}`);
+      btn.className = 'swatch';
+      btn.style.background = hex;
+      nodes.colors.set(hex, btn);
+    }
+
+    nodes.dual = add('dual', 'CC', '双语字幕', 'pip-dual');
+    add('reset', '↺', '恢复为官方当前设置', 'pip-reset');
+    add('appearance', '✓', '收起样式设置', 'pip-collapse');
+
+    return { bar, nodes };
   }
 
   /** 播放状态下按钮图标要跟着变，所以要在 video 上直接听这几个事件（心跳只作兜底） */
@@ -1117,9 +1529,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     closingByUs = false;
     opening = true;
     try {
+      // 尺寸按**当前外观**现算：字号不跟窗口走，那窗口就得跟着字号走（见 pipHeight）
       pipWin = await documentPictureInPicture.requestWindow({
         width: PIP_WIDTH,
-        height: PIP_HEIGHT,
+        height: pipHeight(appearance),
         disallowReturnToOpener: true,
       });
     } catch (err) {
@@ -1165,6 +1578,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     stopFrame();
     pipWin = null;
     styleEl = null; // 那张 <style> 随窗口一起没了
+    styleNodes = null; // 样式条的回显引用同理
+    barMode = 'play';  // 新窗口从播放控制栏开始，不继承上一扇窗的样式条状态
     lastKey = '';
     lastFill = '';  // 新窗口的填充条是从 0 开始的，别被上一扇窗的值挡住第一次写
     refreshButton();
@@ -1181,6 +1596,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
     { id: null, act: 'fwd', glyph: '+5s', label: '前进 5 秒' },
     { id: 'pip-next', act: 'next', glyph: '⏭', label: '下一句' },
     { id: 'pip-rate', act: 'rate', glyph: '1×', label: '倍速（点击循环）' },
+    { id: 'pip-style', act: 'appearance', glyph: 'Aa', label: '字幕样式' },
   ];
 
   function buildWindow(win) {
@@ -1233,8 +1649,19 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       bar.append(btn);
     }
 
-    box.append(stage, bar);
+    // 控制栏与样式条同处一个容器：切换只改 display（见 setBarMode），布局高度只按
+    // 当前可见的那一条算 —— 否则样式条会把控制栏顶成两行、把字幕压上去
+    const bars = d.createElement('div');
+    bars.id = 'bars';
+    const { bar: styleBar, nodes } = buildStyleBar(d);
+    styleNodes = nodes;
+    bars.append(bar, styleBar);
+
+    box.append(stage, bars);
     d.body.append(box);
+
+    setBarMode(barMode);
+    syncStyleBar();
 
     // 委托：一个监听器覆盖全部按钮，按钮是浮窗自己的，不受页面影响
     d.addEventListener('click', (ev) => {
@@ -1343,6 +1770,22 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
       pipCss: () => pipCss(appearance),
       parseSettings,
       getAppearance: () => ({ ...appearance }),
+      // 浮窗自己的外观（PLAN 027）：样式条上的每一次调整都走 command()，这里给测试与
+      // 探针留一个不必模拟点击的直入口
+      appearanceOwn: () => ({ ...own }),
+      setAppearanceOwn: (patch) => {
+        setOwn(patch);
+        return { ...own };
+      },
+      resetAppearance: () => {
+        resetAppearance();
+        return { ...own };
+      },
+      parseOwn,
+      stepScale,
+      barMode: () => barMode,
+      STYLE_CHOICES,
+      COLOR_PRESETS,
       // 播放控制：测试与 probe 直接驱动 command()，不必模拟浮窗里的点击
       command,
       syncBar,
@@ -1400,12 +1843,13 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0d0d0f;
 
   refreshButton();
 
-  // 官方外观设置：启动读一次，之后跟着它的变更走（用户在外观页改字号/颜色/样式/双语）
+  // 浮窗外观：启动读一次（首次拿官方当前值播种），之后官方那边再改**只跟语言**
+  // —— 样式 / 字号 / 颜色 / 双语由浮窗的样式条自己说了算（PLAN 027）
   loadAppearance();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'sync' || !changes || !(SETTINGS_KEY in changes)) return;
-      applyAppearance(parseSettings(changes[SETTINGS_KEY].newValue));
+      applyOfficialAppearance(parseSettings(changes[SETTINGS_KEY].newValue));
     });
   } catch {
     // 没有 onChanged（旧实现 / 被裁剪过的包）：那就只在启动时读一次

@@ -2439,7 +2439,7 @@ function withAppearance(patch) {
   return { ...APPEARANCE, state: { ...APPEARANCE.state, ...patch } };
 }
 
-test('桌面字幕：字号来自官方档位，且不随浮窗尺寸变', async () => {
+test('桌面字幕：浮窗外观首次从官方拷来当初始值，之后官方再改都不动', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
   const pip = sandbox.__llgModPip;
   await h.drain();
@@ -2449,22 +2449,103 @@ test('桌面字幕：字号来自官方档位，且不随浮窗尺寸变', async
   assert.match(pip.pipCss(), /#line-secondary \{[^}]*font-size: 20px/);
   assert.doesNotMatch(pip.pipCss(), /clamp\(|vw/, '字号不许跟浮窗尺寸走');
 
-  h.changeSettings(withAppearance({ subtitleScale: 150 }));
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/);
-  assert.match(pip.pipCss(), /#line-secondary \{[^}]*font-size: 30px/);
+  // 首次播种要落盘，而且存的是**完整四项** —— 完全独立之后缺项没法再去官方补
+  const seeded = h.saved.find((entry) => entry.llgPipAppearance);
+  assert.ok(seeded, '首次打开要把官方的当前值播种进落盘');
+  assert.deepEqual({ ...seeded.llgPipAppearance },
+    { style: 'classic', scale: 100, color: '#FFFFFF', dual: true });
 
-  // 档位缺失（旧版本落盘、或值被写坏）→ 退回官方默认 100%
-  h.changeSettings(withAppearance({ subtitleScale: 0 }));
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 27px/);
-
-  // 落盘是 JSON 字符串（zustand persist 的另一种形态）也要认
-  h.changeSettings(JSON.stringify(withAppearance({ subtitleScale: 50 })));
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 13\.5px/, '50% → 12 + 1.5');
+  // 官方那边怎么改都不动了（PLAN 027：浮窗完全独立）
+  h.changeSettings(withAppearance({ subtitleScale: 150, subtitleColor: '#FFD60A' }));
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 27px/, '字号不跟官方');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #FFFFFF/, '颜色也不跟官方');
 });
 
-test('桌面字幕：颜色、样式预设、双语都跟着官方外观走', async () => {
+test('桌面字幕：官方那份读不成/读坏了时，播种用默认值（不是拿脏值当初值）', async () => {
+  // 落盘是 JSON 字符串（zustand persist 的另一种形态）也要认；档位是 0 → 退回默认 100%
+  const { sandbox, h } = await harness({
+    withPip: true,
+    settings: JSON.stringify(withAppearance({ subtitleScale: 0, subtitleStyle: 'nope' })),
+  });
+  await h.drain();
+
+  const seeded = h.saved.find((entry) => entry.llgPipAppearance);
+  assert.equal(seeded.llgPipAppearance.scale, 100, '档位被写坏 → 官方默认 100%');
+  assert.equal(sandbox.__llgModPip.appearanceOwn().style, 'classic', '预设不认得 → 默认 classic');
+  assert.match(sandbox.__llgModPip.pipCss(), /#line-primary \{[^}]*font-size: 27px/);
+
+  // 官方那份整个读不到（被裁剪的包 / 首次安装）→ 同样退回默认值
+  const bare = await harness({ withPip: true });
+  await bare.h.drain();
+  assert.equal(bare.sandbox.__llgModPip.appearanceOwn().scale, 100);
+});
+
+test('桌面字幕：落盘里有浮窗外观时就用它，官方那份已经无关', async () => {
+  const { sandbox, h } = await harness({
+    withPip: true,
+    settings: withAppearance({ subtitleScale: 150 }),
+    stored: {
+      llgPipAppearance: { style: 'contrast', scale: 130, color: '#64D2FF', dual: false },
+    },
+  });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+
+  // 130% → 基座 31.2，原文行 31.2 × 27/24 = 35.1（官方那边是 150%，照样不管）
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 35\.1px/);
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #64D2FF/);
+  assert.match(pip.pipCss(), /\.kline \{[^}]*background: rgba\(0, 0, 0, 0\.88\)/,
+    'contrast 是逐行底板');
+  assert.ok(
+    !h.saved.some((entry) => entry.llgPipAppearance),
+    '落盘里已经有 → 既不重写也不拿官方覆盖',
+  );
+});
+
+test('桌面字幕：窗口能拖小（内容里不许有固有最小尺寸）', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+
+  const css = pip.pipCss();
+
+  // 控制栏那排按钮曾经写死 42px（toggle 54px）：六个按钮 + 间距 + 内边距 ≈ 320px，
+  // 等于给 PiP 窗口设了一个拖不下去的下限
+  assert.doesNotMatch(css, /#bar button \{[^}]*min-width: 42px/, '按钮不许写死最小宽度');
+  assert.doesNotMatch(css, /#pip-toggle \{[^}]*min-width: 54px/, 'toggle 也不许写死');
+  assert.match(css, /#bar button \{[^}]*min-width: 0/, '按钮要能跟着窗口一起收窄');
+  assert.match(css, /#bar button \{[^}]*white-space: nowrap/, '收窄时不许折行');
+
+  // flex 子项默认 min-width: auto，会被内容的 min-content 撑住 —— 链条上每一环都要解除
+  for (const sel of ['#box', '#stage', '#plate', '\\.kline']) {
+    assert.match(css, new RegExp(`${sel} \\{[^}]*min-width: 0`), `${sel} 要解除固有最小尺寸`);
+  }
+});
+
+test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async () => {
   const { h } = await harness({ withPip: true, settings: APPEARANCE });
   await h.drain();
+  h.gesture();
+  await h.drain();
+
+  // 100% 档 + classic 底板 + 双语：两行字幕 + 控制栏 ≈ 145px（旧的 264 上下各留一大块空白）
+  const fit = h.pip.lastOptions;
+  assert.ok(fit.height > 120 && fit.height < 180, `默认高度要贴合内容，实际 ${fit.height}`);
+  assert.ok(fit.width < 1000, '宽度不该再留一大块黑边');
+
+  // 字号不跟窗口走 → 窗口就得跟字号走：150% 档那次开窗必须明显更高
+  const big = await harness({ withPip: true, settings: withAppearance({ subtitleScale: 150 }) });
+  big.h.gesture();
+  await big.h.drain();
+  assert.ok(
+    big.h.pip.lastOptions.height > fit.height + 10,
+    `档位调大后默认高度要跟着长（${big.h.pip.lastOptions.height} vs ${fit.height}）`,
+  );
+});
+
+test('桌面字幕：样式条上改字号/预设/颜色/双语立即生效并落盘', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
 
   h.currentTime = 5;
   show(h, 'テスト', '测试');
@@ -2472,6 +2553,7 @@ test('桌面字幕：颜色、样式预设、双语都跟着官方外观走', as
   h.gesture();
   await h.drain();
 
+  // 播种自官方 classic：整块底板 + 译文行同色 ×.75 + 日语原文行加粗一档
   const classic = h.pipCss();
   assert.match(classic, /#line-primary \{[^}]*color: #FFFFFF/);
   assert.match(classic, /#line-primary \{[^}]*font-weight: 600/, '日语原文行加粗一档（500 + 100）');
@@ -2479,18 +2561,145 @@ test('桌面字幕：颜色、样式预设、双语都跟着官方外观走', as
     'classic 的译文行是同色 ×.75（官方 secondaryAlpha）');
   assert.match(classic, /#plate \{[^}]*background: linear-gradient/, 'classic 的底板画在整块上');
 
-  // 换颜色 + 换预设：cinema 不画底板，改用描边
-  h.changeSettings(withAppearance({ subtitleColor: '#FFD60A', subtitleStyle: 'cinema' }));
-  const cinema = h.pipCss();
-  assert.match(cinema, /#line-primary \{[^}]*color: #FFD60A/);
-  assert.doesNotMatch(cinema, /#plate \{[^}]*background/, 'cinema 不画底板');
-  assert.match(cinema, /#line-primary \{[^}]*paint-order: stroke fill/, 'cinema 靠描边保证可读');
+  // 字号：走真实的点击链路（data-act → command），改一档就生效 + 落盘 + 回显
+  h.pipClick('scale+');
+  assert.equal(pip.appearanceOwn().scale, 110);
+  assert.match(h.pipCss(), /#line-primary \{[^}]*font-size: 29\.7px/, '110% → 26.4 × 27/24');
+  assert.equal(h.saved.at(-1).llgPipAppearance.scale, 110, '改一下就要落盘');
+  assert.equal(h.pipButton('scale-val').textContent, '110%', '样式条回显当前档位');
+  h.pipClick('scale-');
+  assert.equal(pip.appearanceOwn().scale, 100, '减回去');
 
-  // 关掉双语 → 译文行不渲染（官方关掉时也不显示）
-  h.changeSettings(withAppearance({ dualSubtitles: false }));
-  assert.equal(h.pipButton('line-secondary').textContent, '');
-  h.changeSettings(APPEARANCE);
+  // 预设：cinema 不画底板，改用描边；选中的那个按钮要有标记
+  h.pipClick('style:cinema');
+  assert.doesNotMatch(h.pipCss(), /#plate \{[^}]*background/, 'cinema 不画底板');
+  assert.match(h.pipCss(), /#line-primary \{[^}]*paint-order: stroke fill/, 'cinema 靠描边保证可读');
+  assert.equal(h.pipButton('pip-style-cinema').dataset.on, '1');
+  assert.equal(h.pipButton('pip-style-classic').dataset.on, undefined, '没选中的不能有标记');
+
+  // 颜色：小写也认，但生效与落盘一律大写
+  h.pipClick('color:#ffd60a');
+  assert.match(h.pipCss(), /#line-primary \{[^}]*color: #FFD60A/);
+  assert.equal(h.pipButton('pip-color-FFD60A').dataset.on, '1');
+  assert.equal(pip.appearanceOwn().color, '#FFD60A');
+
+  // 双语：浮窗自己的开关（不再只能跟官方）
+  h.pipClick('dual');
+  assert.equal(h.pipButton('line-secondary').textContent, '', '关掉就不渲染译文行');
+  assert.equal(h.pipButton('pip-dual').dataset.on, undefined);
+  h.pipClick('dual');
   assert.equal(h.pipButton('line-secondary').textContent, '测试', '再打开就回来');
+  assert.equal(h.pipButton('pip-dual').dataset.on, '1');
+
+  // 脏值挡在 command 里（不是靠 UI 藏起来）：不认得的预设 / 颜色一律不生效、不落盘
+  const before = h.saved.length;
+  const styleBefore = pip.appearanceOwn().style;
+  h.pipClick('style:nope');
+  h.pipClick('color:#123456');
+  assert.equal(pip.appearanceOwn().style, styleBefore, '不认得的预设不生效');
+  assert.equal(pip.appearanceOwn().color, '#FFD60A', '不在色板里的颜色不生效');
+  assert.equal(h.saved.length, before, '也不许写进落盘');
+});
+
+test('桌面字幕：样式条与控制栏互斥，字幕区一个节点都不动', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  assert.equal(pip.barMode(), 'play');
+  assert.equal(h.pipButton('bar').style.display, '');
+  assert.equal(h.pipButton('stylebar').style.display, 'none', '默认收起');
+
+  h.pipClick('appearance');
+  assert.equal(pip.barMode(), 'style');
+  assert.equal(h.pipButton('bar').style.display, 'none');
+  assert.equal(h.pipButton('stylebar').style.display, '');
+  assert.equal(h.pipText(), 'テスト', '切换不动字幕');
+
+  h.pipClick('appearance');
+  assert.equal(pip.barMode(), 'play');
+  assert.equal(h.pipButton('bar').style.display, '');
+
+  // 窗口被 UA 关掉、再过一次手势重开：新窗口从播放控制栏开始，不继承上一扇窗的状态
+  h.pipClick('appearance');
+  h.lastPipWindow().fire('pagehide');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  assert.equal(pip.isOpen(), true);
+  assert.equal(pip.barMode(), 'play', '新窗口从播放控制栏开始');
+  assert.equal(h.pipButton('stylebar').style.display, 'none');
+});
+
+test('桌面字幕：↺ 把官方当前的设置重新拷一份当浮窗样式', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  pip.setAppearanceOwn({ scale: 150, color: '#FFD60A' });
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/);
+
+  // 官方那边改成 60% / 绿色：浮窗常态下不跟它，但「复位」要把官方此刻的值请回来
+  h.changeSettings(withAppearance({ subtitleScale: 60, subtitleColor: '#30D158' }));
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/, '常态下不跟官方');
+
+  h.pipClick('reset');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #30D158/);
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 16\.2px/, '60% → 14.4 × 27/24');
+  assert.equal(h.saved.at(-1).llgPipAppearance.scale, 60, '复位也要落盘');
+});
+
+test('桌面字幕：语言仍然跟随官方（换语言要换字面与字号比例）', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 27px/, '日语算 CJK：放大一档');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-weight: 600/);
+
+  h.changeSettings(withAppearance({ learningLanguage: 'en' }));
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 24px/, '换成英语：不再放大');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-weight: 500/);
+
+  // 只改样式时（浮窗不跟）样式表一字不改 —— 语言没变就不该白重画
+  const before = pip.pipCss();
+  h.changeSettings(withAppearance({ learningLanguage: 'en', subtitleScale: 150 }));
+  assert.equal(pip.pipCss(), before);
+});
+
+test('桌面字幕：落盘里的浮窗外观被写坏时逐项夹回合法值', async () => {
+  const { sandbox, h } = await harness({
+    withPip: true,
+    settings: APPEARANCE,
+    stored: {
+      llgPipAppearance: { style: 'nope', scale: 999, color: 'not-a-color', dual: 'yes' },
+    },
+  });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+
+  assert.deepEqual({ ...pip.appearanceOwn() },
+    { style: 'classic', scale: 150, color: '#FFFFFF', dual: true }, '逐项兜底，不是整份丢掉');
+
+  // 一半坏一半好：好的那项要保住
+  assert.deepEqual({ ...pip.parseOwn({ style: 'cinema', scale: 'x' }) },
+    { style: 'cinema', scale: 100, color: '#FFFFFF', dual: true });
+
+  // 整个值读不成 / 压根没存过（首次打开）→ null，交给调用方拿官方播种
+  assert.equal(pip.parseOwn(null), null);
+  assert.equal(pip.parseOwn(undefined), null);
+  assert.equal(pip.parseOwn('classic'), null);
 });
 
 test('桌面字幕：分隔符是独立节点，观感与视频内那套一致', async () => {
