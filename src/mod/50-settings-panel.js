@@ -44,7 +44,7 @@
   const ROOT_PAGE = '.panel-content.panel-page[data-page="root"]';
   const ATTR = 'data-llg-mod';
   const HEARTBEAT_MS = 1000;
-  const SECTION_TITLE = 'Linglass Mod';
+  const SECTION_TITLE = 'Linglass-Pro';
 
   /**
    * 本次 content script 上下文的标记。

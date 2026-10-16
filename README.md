@@ -1,4 +1,4 @@
-# linglass-Pro
+# Linglass-Pro
 
 在 [Linglass](https://chromewebstore.google.com/detail/nhncklckpmkkhjcijjgfcgclfpbbkcba)（YouTube 上的双语字幕扩展）之上做**增量改造**的浏览器扩展。
 
@@ -78,7 +78,7 @@
 
 ### 挂在官方设置面板里
 
-上面这些开关出现在 **Linglass 自己的设置面板**（`Linglass Mod` 分组）里，与「字幕样式」「同步模式」那些行同款观感，而不是页面上的外挂按钮。
+上面这些开关出现在 **Linglass 自己的设置面板**（`Linglass-Pro` 分组）里，与「字幕样式」「同步模式」那些行同款观感，而不是页面上的外挂按钮。
 
 ## 环境要求
 
@@ -138,7 +138,7 @@ node tools/probe.mjs --headed --url=<视频地址>     # 也可 --keep / --wait=
 ## 目录结构
 
 ```text
-linglass-Pro/
+Linglass-Pro/
 ├── AGENTS.md               本仓库的 AI 行为约束（改代码前先读）
 ├── Makefile                门禁与日常命令
 ├── build.mjs               构建脚本（契约校验 + 叠加 + 注入自检）

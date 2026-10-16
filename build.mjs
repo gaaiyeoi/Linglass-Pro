@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Linglass Mod 构建脚本
+ * Linglass-Pro 构建脚本
  *
  *   vendor/linglass-<version>/   原始扩展（只读基线，永不修改）
  *   src/mod/                     我们的增量代码

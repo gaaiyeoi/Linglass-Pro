@@ -1,4 +1,4 @@
-# Linglass Mod —— 常用命令
+# Linglass-Pro —— 常用命令
 #
 # 首次使用：
 #   make build        构建 dist/
