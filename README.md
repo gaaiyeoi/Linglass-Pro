@@ -139,7 +139,7 @@ make open            # 打开浏览器扩展管理页
 | `make cast` | 启动手机字幕屏的局域网中转（默认 8899） |
 | `make cast-demo` | 同上，但用假字幕预览手机端排版 |
 | `make open` | 打开扩展管理页 |
-| `make package` | 打两个包到 `release/` |
+| `make package` | 打出安装器包到 `release/` |
 | `make vendor-update` | 拉取官方最新版作为基线并重新构建 |
 | `make clean` | 删除 `dist/` |
 

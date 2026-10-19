@@ -4,20 +4,15 @@
  *
  *   node tools/package.mjs
  *
- * 产出两个东西到 release/（文件名里的版本号读作「官方基线 + 我们的补丁」，
+ * 产出一个包到 release/（文件名里的版本号读作「官方基线 + 我们的补丁」，
  * 例如 1.12.4.900 = 官方 1.12.4 上叠第 900 号补丁）：
  *
  *   Linglass-Pro-<版本>-installer.zip   只有我们的代码 + 安装器 + 向导。
- *                                       对方要先装 Node，双击后由他本机从商店拉官方基线。
- *   Linglass-Pro-<版本>-extension.zip   完整包：dist/ 的全部内容 + 向导。
- *                                       解压后直接能在扩展管理页加载，不用装任何东西。
+ *                                       对方要先装 Node，双击后由他本机从商店拉官方基线，
+ *                                       再把 src/mod 叠加到本机产物上。
  *
- * ⚠️ 完整包含 Linglass 的官方代码。分发它是**使用者的选择**，风险由分发者承担 ——
- * 公开传播可能招致原作者投诉（乃至被 DMCA 下架）。仓库自身仍然只提交我们自己的代码，
- * vendor/ 与 dist/ 都不进版本控制。
- *
- * 纯代码包的自检仍然禁止出现 vendor/ 与 dist/（见 assertNoOfficialCode）——
- * 想发一个「干净」的包时就用它。
+ * 不产出含官方代码的完整包：仓库与 release 只放我们自己的代码。
+ * 纯代码包的自检禁止出现 vendor/ 与 dist/（见 assertNoOfficialCode）。
  *
  * 版本号取自 dist/manifest.json，所以要先 `make build`（Makefile 里 package 依赖 build）。
  * 注意 build.mjs 把 patch 固定为 900（避免和商店更新撞号），于是 1.12.3 与 1.12.4
@@ -228,40 +223,19 @@ async function main() {
     throw new Error('install-macos.command 丢了可执行位，用户双击会没反应');
   }
 
-  // 完整包：dist/ 原样 + 向导
-  const distFiles = await listFiles(DIST_DIR);
-  const extensionFiles = await readEntries(DIST_DIR, distFiles);
-  const extensionZip = buildArchive('extension', {
-    ...context,
-    extensionFiles,
-  });
-  const extensionPacked = assertExtensionLayout(
-    extensionZip,
-    archiveRootName(baseVersion, manifestVersion),
-  );
-
   await rm(RELEASE_DIR, { recursive: true, force: true });
   await mkdir(RELEASE_DIR, { recursive: true });
 
-  const outputs = [
-    { kind: 'extension', buf: extensionZip, count: extensionPacked.length },
-    { kind: 'installer', buf: installerZip, count: installerPacked.length },
-  ];
-
-  for (const output of outputs) {
-    const name = packageFileName(output.kind, baseVersion, manifestVersion);
-    const abs = path.join(RELEASE_DIR, name);
-    await writeFile(abs, output.buf);
-    const size = `${(output.buf.length / 1024 / 1024).toFixed(2)} MB`;
-    const what = output.kind === 'extension' ? '含官方代码，下载即用' : '只有我们的代码，需装 Node';
-    log(`${output.kind === 'extension' ? '完整包  ' : '纯代码包'}  ${path.relative(ROOT, abs)}`);
-    log(`          ${output.count} 个文件 / ${size} / ${what}`);
-  }
+  const name = packageFileName('installer', baseVersion, manifestVersion);
+  const abs = path.join(RELEASE_DIR, name);
+  await writeFile(abs, installerZip);
+  const size = `${(installerZip.length / 1024 / 1024).toFixed(2)} MB`;
+  log(`纯代码包  ${path.relative(ROOT, abs)}`);
+  log(`          ${installerPacked.length} 个文件 / ${size} / 只有我们的代码，需装 Node`);
 
   console.log('');
-  log('完整包：对方解压 → 在扩展管理页选中那个文件夹 → 完事（不用装 Node）');
-  log('纯代码包：对方要先装 Node，再双击里面的安装文件（本机去商店拉官方基线）');
-  log('⚠️ 完整包含 Linglass 官方代码，只供私下使用');
+  log('对方要先装 Node，再双击里面的安装文件');
+  log('安装时由他本机从商店拉官方基线，再把本项目改动叠加进去');
 }
 
 /** 只在被直接执行时跑 main（被 import 时什么都不做，方便单测构包函数） */
