@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="612" viewBox="0 0 960 612" role="img"
-     aria-label="桌面字幕浮窗示意：上一句 / 当前句 / 下一句三段双语字幕、文节分隔符与注音、句内进度条、播放控制栏，以及点 Aa 之后出现的样式条">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="880" viewBox="0 0 960 880" role="img"
+     aria-label="桌面字幕浮窗示意：上一句 / 当前句 / 下一句三段双语字幕、文节分隔符与注音、句内填充、控制栏上方的整片进度条与播放控制栏；下半是点 Aa 之后打开的整页设置面板，含官方设置与 Linglass-Pro 分组">
   <style>
     text { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
            "Noto Sans CJK SC", system-ui, sans-serif; }
     .t    { font-size: 15px; font-weight: 600; fill: #1f2328; }
     .note { font-size: 12.5px; fill: #57606a; }
-    .bar  { fill: #15171c; stroke: #2c313a; stroke-width: 1.5; }
+    .bar  { fill: #141518; stroke: #2c313a; stroke-width: 1.5; }
     .tip  { font-size: 11.5px; fill: #7f8c9b; }
     .btn  { fill: #23272e; stroke: #333941; stroke-width: 1.2; }
     .on   { fill: #1b3a5c; stroke: #3d7ebf; stroke-width: 1.4; }
@@ -13,97 +13,130 @@
     .bton { font-size: 11.5px; fill: #cfe4ff; }
     .time { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 12px; fill: #8b949e; }
+    .pt   { font-size: 12.5px; fill: #c9d1d9; }
+    .pdim { font-size: 11.5px; fill: #8b949e; }
+    .sec  { font-size: 11px; fill: #7f8c9b; letter-spacing: 0.4px; }
+    .tog  { fill: #3d7ebf; }
+    .togk { fill: #ffffff; }
+    .togo { fill: #39404a; }
   </style>
 
-  <rect x="0.5" y="0.5" width="959" height="611" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
+  <rect x="0.5" y="0.5" width="959" height="879" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
 
   <text class="t" x="30" y="44">桌面字幕浮窗（系统级画中画）</text>
   <text class="note" x="270" y="44">—— 浏览器最小化、切到别的应用之后，字幕仍留在桌面上</text>
 
-  <rect class="bar" x="60" y="76" width="840" height="330" rx="14"/>
-  <text class="tip" x="84" y="104">桌面字幕</text>
-  <path d="M862 92 L874 104 M874 92 L862 104" stroke="#6b7280" stroke-width="1.6" fill="none"/>
-  <line x1="60" y1="118" x2="900" y2="118" stroke="#262b33" stroke-width="1.5"/>
+  <!-- ① 浮窗本体 -->
+  <rect class="bar" x="60" y="70" width="840" height="352" rx="14"/>
+  <text class="tip" x="84" y="98">桌面字幕</text>
+  <path d="M862 86 L874 98 M874 86 L862 98" stroke="#6b7280" stroke-width="1.6" fill="none"/>
+  <line x1="60" y1="112" x2="900" y2="112" stroke="#262b33" stroke-width="1.5"/>
 
-  <!-- ① 上一句：小一号（0.8×）、淡一半（55%），有译文是因为它刚被播过 -->
-  <text x="100" y="158" font-size="24" fill="#e8eaed" opacity="0.55">あさ ごはんを 食べた</text>
-  <text x="100" y="180" font-size="14" fill="#aab4c2" opacity="0.5">吃了早饭。</text>
-  <text class="tip" x="560" y="154">← 上一句：0.8× 字号、55% 不透明度（刚播过 → 有译文）</text>
+  <!-- 上一句：小一号（0.8×）、淡一半（55%），有译文是因为它刚被播过 -->
+  <text x="96" y="152" font-size="24" fill="#e8eaed" opacity="0.55">あさ ごはんを 食べた</text>
+  <text x="96" y="174" font-size="14" fill="#aab4c2" opacity="0.5">吃了早饭。</text>
+  <text class="tip" x="560" y="148">← 上一句：0.8× 字号、55% 不透明度（刚播过 → 有译文）</text>
 
-  <!-- ② 当前句：正常字号，带注音与文节分隔符 -->
-  <text class="tip" x="100" y="212" font-size="15">きのう</text>
-  <text x="100" y="244" font-size="30" fill="#e8eaed">昨日</text>
-  <line x1="172" y1="220" x2="172" y2="248" stroke="#6b7280" stroke-width="1.5"/>
-  <text x="184" y="244" font-size="30" fill="#e8eaed">買った</text>
-  <line x1="286" y1="220" x2="286" y2="248" stroke="#6b7280" stroke-width="1.5"/>
-  <text x="298" y="244" font-size="30" fill="#e8eaed">本を</text>
-  <line x1="370" y1="220" x2="370" y2="248" stroke="#6b7280" stroke-width="1.5"/>
-  <text x="382" y="244" font-size="30" fill="#e8eaed">読む</text>
-  <text x="100" y="276" font-size="18" fill="#aab4c2">读昨天买的书。</text>
-  <text class="tip" x="600" y="212">← 注音跟随官方设置（官方关着就是纯净原文）</text>
-  <text class="tip" x="600" y="244">← 文节分隔符是可选开关，不往文本里塞字符</text>
-  <text class="tip" x="600" y="276">← 当前句：句内进度条只画在这里</text>
+  <!-- 当前句：正常字号，带注音、文节分隔符与文字身后的句内填充 -->
+  <text class="tip" x="96" y="206" font-size="14">きのう</text>
+  <rect x="96" y="212" width="222" height="46" rx="6" fill="#1b3a5c"/>
+  <text x="100" y="248" font-size="30" fill="#e8eaed">昨日</text>
+  <line x1="172" y1="224" x2="172" y2="252" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="184" y="248" font-size="30" fill="#e8eaed">買った</text>
+  <line x1="286" y1="224" x2="286" y2="252" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="298" y="248" font-size="30" fill="#e8eaed">本を</text>
+  <text x="96" y="278" font-size="18" fill="#aab4c2">读昨天买的书。</text>
+  <text class="tip" x="600" y="206">← 注音跟随官方设置（官方关着就是纯净原文）</text>
+  <text class="tip" x="600" y="232">← 文节分隔符是可选开关，不往文本里塞字符</text>
+  <text class="tip" x="600" y="258">← 句内填充：这一句读了多少（句级时间轴 + 线性插值）</text>
+  <text class="tip" x="600" y="284">← 当前句：比上下文行大一档，只有它带填充</text>
 
-  <!-- ③ 下一句：原文来自整条轨，译文通常还没有（官方只在播到那句时才产生译文） -->
-  <text x="100" y="308" font-size="24" fill="#e8eaed" opacity="0.55">あしたは 図書館へ 行く</text>
-  <text class="tip" x="560" y="304">← 下一句：通常只有原文 —— 译文要等这句被播到过</text>
+  <!-- 下一句：原文来自整条轨，译文通常还没有 -->
+  <text x="96" y="316" font-size="24" fill="#e8eaed" opacity="0.55">あしたは 図書館へ 行く</text>
 
-  <!-- 句内进度 -->
-  <text class="tip" x="712" y="322">句内进度：句级时间轴 + 线性插值</text>
-  <rect x="100" y="330" width="760" height="6" rx="3" fill="#2b3038"/>
-  <rect x="100" y="330" width="292" height="6" rx="3" fill="#7db3f0"/>
+  <!-- 整片进度条：控制栏正上方 -->
+  <rect x="96" y="338" width="768" height="4" rx="2" fill="#2b3038"/>
+  <rect x="96" y="338" width="300" height="4" rx="2" fill="#ffffff"/>
+  <circle cx="396" cy="340" r="5" fill="#ffffff"/>
+  <text class="tip" x="864" y="330" text-anchor="end">整片进度：点一下或拖动即可跳转（直播等时长未知时不跳）</text>
 
   <!-- 播放控制栏 -->
-  <rect class="btn" x="100" y="352" width="76" height="28" rx="8"/>
-  <text class="bt" x="138" y="371" text-anchor="middle">上一句</text>
-  <rect class="btn" x="186" y="352" width="92" height="28" rx="8"/>
-  <text class="bt" x="232" y="371" text-anchor="middle">播放 / 暂停</text>
-  <rect class="btn" x="288" y="352" width="76" height="28" rx="8"/>
-  <text class="bt" x="326" y="371" text-anchor="middle">下一句</text>
-  <rect class="btn" x="374" y="352" width="72" height="28" rx="8"/>
-  <text class="bt" x="410" y="371" text-anchor="middle">1.25×</text>
-  <rect class="btn" x="456" y="352" width="52" height="28" rx="8"/>
-  <text class="bt" x="482" y="371" text-anchor="middle">Aa</text>
-  <text class="tip" x="520" y="371">Aa = 字幕样式（点开换成下面那条）</text>
-  <text class="time" x="860" y="371" text-anchor="end">01:23 / 12:45</text>
+  <rect class="btn" x="96" y="356" width="76" height="34" rx="8"/>
+  <text class="bt" x="134" y="378" text-anchor="middle">上一句</text>
+  <rect class="btn" x="180" y="356" width="92" height="34" rx="8"/>
+  <text class="bt" x="226" y="378" text-anchor="middle">播放 / 暂停</text>
+  <rect class="btn" x="280" y="356" width="76" height="34" rx="8"/>
+  <text class="bt" x="318" y="378" text-anchor="middle">下一句</text>
+  <rect class="btn" x="364" y="356" width="68" height="34" rx="8"/>
+  <text class="bt" x="398" y="378" text-anchor="middle">1.25×</text>
+  <rect class="on" x="440" y="356" width="48" height="34" rx="8"/>
+  <text class="bton" x="464" y="378" text-anchor="middle">Aa</text>
+  <text class="tip" x="500" y="378">Aa = 整页设置面板（见下半）</text>
+  <text class="time" x="864" y="378" text-anchor="end">01:23 / 12:45</text>
 
-  <!-- 点 Aa 之后的样式条：与控制栏同一行的另一种形态 -->
-  <text class="note" x="60" y="448">点控制栏右端的 Aa：控制栏整条换成样式条 —— 同一位置、同一高度，不遮字幕、不改窗口大小。</text>
-  <rect class="bar" x="60" y="462" width="840" height="44" rx="12"/>
+  <text class="note" x="60" y="462">点控制栏右端的 Aa：字幕区整块换成设置面板 —— 同一扇窗、同样暗色，底部 × 回到字幕，子页用 &lt; 返回。</text>
 
-  <rect class="btn" x="110" y="470" width="44" height="28" rx="8"/>
-  <text class="bt" x="132" y="489" text-anchor="middle">A−</text>
-  <text class="bt" x="199" y="489" text-anchor="middle">110%</text>
-  <rect class="on" x="244" y="470" width="44" height="28" rx="8"/>
-  <text class="bton" x="266" y="489" text-anchor="middle">A+</text>
+  <!-- ② 点 Aa 之后的整页设置面板 -->
+  <rect class="bar" x="60" y="480" width="840" height="330" rx="14"/>
+  <path d="M88 502 L80 510 L88 518" stroke="#c9d1d9" stroke-width="1.8" fill="none"/>
+  <text class="t" x="104" y="515" style="fill:#e8eaed">设置</text>
+  <path d="M862 498 L874 510 M874 498 L862 510" stroke="#6b7280" stroke-width="1.6" fill="none"/>
+  <line x1="60" y1="528" x2="900" y2="528" stroke="#262b33" stroke-width="1.5"/>
 
-  <rect class="btn" x="304" y="470" width="52" height="28" rx="8"/>
-  <text class="bt" x="330" y="489" text-anchor="middle">经典</text>
-  <rect class="btn" x="362" y="470" width="52" height="28" rx="8"/>
-  <text class="bt" x="388" y="489" text-anchor="middle">影院</text>
-  <rect class="btn" x="420" y="470" width="52" height="28" rx="8"/>
-  <text class="bt" x="446" y="489" text-anchor="middle">漫画</text>
-  <rect class="btn" x="478" y="470" width="52" height="28" rx="8"/>
-  <text class="bt" x="504" y="489" text-anchor="middle">对比</text>
+  <!-- 左列：官方根页 -->
+  <text class="pdim" x="86" y="554">学习语言</text>
+  <rect class="btn" x="86" y="562" width="380" height="28" rx="7"/>
+  <text class="pt" x="98" y="581">日本語</text>
+  <path d="M434 573 L439 579 L444 573" stroke="#8b949e" stroke-width="1.4" fill="none"/>
 
-  <!-- 官方四档色板（当前选中的那个画一圈亮边） -->
-  <circle cx="557" cy="484" r="11" fill="#FFFFFF" stroke="#333941" stroke-width="1.2"/>
-  <circle cx="587" cy="484" r="11" fill="#FFD60A" stroke="#3d7ebf" stroke-width="2"/>
-  <circle cx="617" cy="484" r="11" fill="#64D2FF" stroke="#333941" stroke-width="1.2"/>
-  <circle cx="647" cy="484" r="11" fill="#30D158" stroke="#333941" stroke-width="1.2"/>
+  <text class="pdim" x="86" y="612">母语</text>
+  <rect class="btn" x="86" y="620" width="380" height="28" rx="7"/>
+  <text class="pt" x="98" y="639">简体中文</text>
+  <path d="M434 631 L439 637 L444 631" stroke="#8b949e" stroke-width="1.4" fill="none"/>
 
-  <rect class="on" x="670" y="470" width="44" height="28" rx="8"/>
-  <text class="bton" x="692" y="489" text-anchor="middle">CC</text>
-  <rect class="on" x="722" y="470" width="44" height="28" rx="8"/>
-  <text class="bton" x="744" y="489" text-anchor="middle">≡1</text>
-  <rect class="btn" x="774" y="470" width="40" height="28" rx="8"/>
-  <text class="bt" x="794" y="489" text-anchor="middle">↺</text>
-  <rect class="btn" x="822" y="470" width="40" height="28" rx="8"/>
-  <text class="bt" x="842" y="489" text-anchor="middle">✓</text>
+  <text class="pt" x="86" y="672">Linglass 字幕</text>
+  <rect class="tog" x="426" y="660" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="452" cy="670" r="7"/>
 
-  <text class="tip" x="60" y="524">字号 50–150% ｜ 经典 / 影院 / 漫画 / 对比（官方四套预设）｜ 官方四档色板 ｜ CC 双语</text>
-  <text class="tip" x="60" y="542">≡ 上下文行数：0 只看当前句 / 1 加上下一句 / 2 上下都给 ｜ ↺ 恢复为官方当前设置 ｜ ✓ 收起</text>
+  <text class="pt" x="86" y="704">双语字幕</text>
+  <rect class="tog" x="426" y="692" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="452" cy="702" r="7"/>
 
-  <text class="note" x="60" y="570">样式条只影响浮窗：改完立刻落盘，官方外观页那边再改也不会动它（学习语言 / 母语除外，那两项跟随官方）。</text>
-  <text class="note" x="60" y="592">「关闭」只有两个入口：控制栏按钮、Linglass 设置面板里的开关 —— 点 × / 切到别的应用 / 刷新页面 / 换视频，它都会自己回来。</text>
+  <text class="pt" x="86" y="736">词语上方显示读音</text>
+  <rect class="togo" x="426" y="724" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="436" cy="734" r="7"/>
+
+  <text class="pt" x="86" y="768">配图</text>
+  <rect class="tog" x="426" y="756" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="452" cy="766" r="7"/>
+
+  <!-- 右列：nav 行 + 我们自己的分组 -->
+  <rect class="btn" x="520" y="548" width="352" height="30" rx="7"/>
+  <text class="pt" x="534" y="568">观看模式</text>
+  <text class="pdim" x="856" y="568" text-anchor="end">标准  ›</text>
+
+  <rect class="btn" x="520" y="586" width="352" height="30" rx="7"/>
+  <text class="pt" x="534" y="606">外观</text>
+  <text class="pdim" x="856" y="606" text-anchor="end">经典 · 110%  ›</text>
+
+  <text class="sec" x="520" y="640">LINGLASS-PRO</text>
+
+  <text class="pt" x="520" y="668">字幕句内断句</text>
+  <rect class="tog" x="836" y="656" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="862" cy="666" r="7"/>
+
+  <text class="pt" x="520" y="700">学习面板</text>
+  <rect class="tog" x="836" y="688" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="862" cy="698" r="7"/>
+
+  <text class="pt" x="520" y="732">桌面字幕浮窗</text>
+  <rect class="tog" x="836" y="720" width="36" height="20" rx="10"/>
+  <circle class="togk" cx="862" cy="730" r="7"/>
+
+  <rect class="btn" x="520" y="748" width="352" height="30" rx="7"/>
+  <text class="pt" x="534" y="768">导出 Markdown（学习面板）</text>
+  <text class="pdim" x="856" y="768" text-anchor="end">›</text>
+
+  <text class="tip" x="60" y="838">面板样式直接从官方设置面板的 shadowRoot 拷来（主题解析后的颜色），观感 1:1；改完写回同一份 Linglass 设置，页面内嵌字幕同步变化。</text>
+  <text class="note" x="60" y="860">「关闭」只有两个入口：控制栏按钮、Linglass 设置面板里的开关 —— 点 × / 切到别的应用 / 刷新页面 / 换视频，它都会自己回来。</text>
 </svg>
