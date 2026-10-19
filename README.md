@@ -105,7 +105,7 @@ make cast-demo   # 没有视频时用假字幕预览手机端排版
 
 ## 只想装上用（不写代码）
 
-**公开下载只有安装器版**，不含任何 Linglass 官方代码：
+从 [Releases](https://github.com/gaaiyeoi/Linglass-Pro/releases) 下载安装器版：
 
 1. 装 Node.js 18+（[nodejs.org](https://nodejs.org)）
 2. 下载 `Linglass-Pro-<版本>-installer.zip`，解压
@@ -114,24 +114,6 @@ make cast-demo   # 没有视频时用假字幕预览手机端排版
 5. 扩展管理页 → 开发者模式 → 加载已解压的扩展程序 → 选 `dist/` 目录
 
 包里带一份图文向导（[`docs/install-guide.html`](docs/install-guide.html)），装不上时先看它。
-
-> ⚠️ **版权与分发边界**
->
-> - 本仓库和公开 release **不包含、也不提供** Linglass 官方代码的下载。
-> - 安装器版里的官方代码是**用户本机在安装时自己从 Chrome 商店拉取**的，获取行为发生在用户与商店之间。
-> - 请勿把 `vendor/`、`dist/` 或任何含官方代码的打包产物上传到 GitHub Release、公开网盘、论坛、应用商店等公共渠道。
-
-### 自用完整包（不对外分发）
-
-`make package` 仍会同时产出完整版，但它含官方代码，**只供本人或小范围私下使用**：
-
-```bash
-make package
-# → release/Linglass-Pro-<版本>-extension.zip   完整版，解压即用，内含官方代码
-# → release/Linglass-Pro-<版本>-installer.zip   安装器版，可公开分发
-```
-
-完整版不要上传到任何公开渠道；需要给别人用就发安装器版。
 
 ## 起步（开发）
 
@@ -208,7 +190,7 @@ make open            # 打开浏览器扩展管理页
 - 手机字幕屏要在 Mac 上跑 `make cast`，只传字幕、不传画面与声音；Mac 页面关掉就没有内容了。
 - 手机上的播放控制与上滑选句跳转都要靠 Mac 上那个标签页里的扩展去执行，所以那个页面不能关。
 - 手机字幕屏走局域网 HTTP，没有鉴权：同一 Wi-Fi 上知道地址的人都能看。
-- 公开分发只有安装器版，所以对方必须先装 Node；想做成「免 Node 的干净包」就得随包附带官方代码，那是再分发，不做。取舍见 [`docs/plans/023-one-click-installer.md`](docs/plans/023-one-click-installer.md)。
+- 安装器版要先装 Node；想做成「免 Node 的包」就得把官方代码一起打进去，这里不做。取舍见 [`docs/plans/023-one-click-installer.md`](docs/plans/023-one-click-installer.md)。
 - 官方发新版不会自动同步，需要重新跑一次安装流程。
 
 ## 目录结构
