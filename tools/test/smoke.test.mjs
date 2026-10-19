@@ -37,6 +37,22 @@ async function sourceOf(file) {
 }
 
 /**
+ * 在独立上下文里跑一次 00-shared.js，取回真实的 design 令牌。
+ *
+ * 为什么不在每个 harness 里加载真的 00-shared.js：它会把 `onTick` 接上真定时器
+ * （测试用 h.tick() 手动驱动，真定时器会让 node:test 挂住不退出）。所以主沙箱里
+ * 00-shared 一直是桩，只有令牌这一块从真实实现里取。
+ */
+let designCache = null;
+async function realDesign() {
+  if (designCache) return designCache;
+  const context = vm.createContext({ document: { getElementById: () => null } });
+  vm.runInContext(await sourceOf('00-shared.js'), context, { filename: '00-shared.js' });
+  designCache = context.__llgModShared.design;
+  return designCache;
+}
+
+/**
  * 搭一个沙箱，装上桩件与待测模块。
  *
  * @param {object} [options]
@@ -112,7 +128,8 @@ async function harness({
     subtitleQueries: () => subtitleQueries,
     // 官方外观设置（chrome.storage.sync）与它的变更监听器
     sync: settings == null ? {} : { 'linglass-settings': settings },
-    syncListeners: [],
+    /** chrome.storage.onChanged 的订阅者（local / sync 共用同一个事件） */
+    storageListeners: [],
     /** 我们写回官方设置的原始 entry（chrome.storage.sync.set 的入参） */
     syncWrites: [],
     features: [],
@@ -639,7 +656,7 @@ async function harness({
           },
         },
         onChanged: {
-          addListener: (fn) => h.syncListeners.push(fn),
+          addListener: (fn) => h.storageListeners.push(fn),
         },
       },
     },
@@ -677,6 +694,9 @@ async function harness({
     injectStyle: () => {},
     registerFeature: (feature) => h.features.push(feature),
     listFeatures: () => h.features,
+    // 复制清道夫（PLAN 050）：真实现由「复制」那两条用例单独加载 00-shared.js 来测，
+    // 这里只保证 30- 开窗时调得到它。
+    installCopySanitizer: () => {},
   };
 
   // 15-ja-break.js 的桩：桌面字幕只跟它要「开关状态」和「分隔符长什么样」。
@@ -685,6 +705,11 @@ async function harness({
     isEnabled: () => h.jaBreakEnabled,
     SEPARATOR: '|',
   };
+
+  // 设计令牌（PLAN 047）：真实实现是 00-shared.js 的 design 导出。这里不加载真模块
+  // （控制栏那套在桩里跑不起来），而是**单独跑一次 00-shared.js** 把导出的令牌取过来，
+  // 避免在测试里手抄一份会漂移的颜色表。
+  sandbox.__llgModShared.design = await realDesign();
 
   // 真实 00-shared.js 不加载（控制栏那套没法在桩里跑），但**共享心跳**必须照它的
   // 语义提供：各模块用 shared.onTick(fn) 注册 1s 心跳，h.tick() 就是那一次 tick
@@ -814,7 +839,15 @@ async function harness({
   h.changeSettings = (value) => {
     h.sync = { 'linglass-settings': value };
     const changes = { 'linglass-settings': { newValue: value } };
-    for (const fn of [...h.syncListeners]) fn(changes, 'sync');
+    for (const fn of [...h.storageListeners]) fn(changes, 'sync');
+  };
+
+  /**
+   * 模拟官方往 chrome.storage.local 写了东西（PLAN 049：骨架靠这个事件采用）。
+   * 桩件里的 `h.stored` 要由调用方自己先写，事件只负责通知。
+   */
+  h.emitLocal = (changes) => {
+    for (const fn of [...h.storageListeners]) fn(changes, 'local');
   };
   /**
    * 句内进度条的当前值。
@@ -917,10 +950,6 @@ async function harness({
   // 轨道在 applyTranslations 里跟它要 fingerprint（PLAN 031）
   vm.runInContext(await sourceOf('05-srt.js'), sandbox, {
     filename: '05-srt.js',
-  });
-  // 06-ai-translate.js 也是纯函数（PLAN 034），面板运行时按需取 globalThis 上的名字
-  vm.runInContext(await sourceOf('06-ai-translate.js'), sandbox, {
-    filename: '06-ai-translate.js',
   });
   vm.runInContext(await sourceOf('10-subtitle-track.js'), sandbox, {
     filename: '10-subtitle-track.js',
@@ -1106,6 +1135,27 @@ test('字幕轨道：重看同一段不重复收录', async () => {
   show(h, 'こんにちは', '你好');
   assert.equal(track.getCues().length, 2, '重看不应新增句子');
   assert.equal(track.getCues()[0].start, 5, '应复用原来那句，而不是新建在 5.2');
+});
+
+/**
+ * PLAN 053 的回归：官方同一句是**分步上屏**的（先半句、再补全）。
+ *
+ * 旧实现按整行文本当换句判据，于是每一步都新建一条 start 几乎相同的 cue；
+ * 浮窗只显示半句，句内进度的分母也只有半句。现在必须并回同一条。
+ */
+test('字幕轨道：同一句分步上屏合并成一条完整句', async () => {
+  const { h, track } = await harness();
+
+  h.currentTime = 5;
+  show(h, 'あの', '那个');
+  h.currentTime = 5.3;
+  show(h, 'あの、そうですね', '那个，是啊');
+
+  const cues = track.getCues();
+  assert.equal(cues.length, 1, '同一句的补全不许拆成多条');
+  assert.equal(cues[0].start, 5, 'start 保持第一次出现的时间');
+  assert.equal(cues[0].primary, 'あの、そうですね', '轨道里存的是完整句');
+  assert.equal(cues[0].secondary, '那个，是啊', '译文跟着补全');
 });
 
 test('字幕轨道：字幕空档期只收尾、不建空句', async () => {
@@ -1573,6 +1623,73 @@ test('字幕轨道：索引里暂时没有本视频时，官方稍后写入仍�
 });
 
 /**
+ * PLAN 049 的根因（本机实测）：`RYlmJUAIGtM` 的官方缓存比页面打开晚约 100 秒才写入，
+ * 而轮询窗口只有 60 次心跳 —— 窗口一过 `done=true`，骨架从此永远读不到，
+ * 面板与导出自始至终只有播放过的句子。
+ */
+test('字幕轨道：轮询窗口耗尽后才写入的官方缓存，靠 storage 事件仍能采用', async () => {
+  const { h, track } = await harness();
+  await h.drain();
+  await h.drain();
+
+  // 把 60 次窗口烧完（官方这时还没写缓存）
+  for (let i = 0; i < 70; i += 1) {
+    h.tick();
+    await h.drain();
+  }
+  assert.equal(track.getCues().length, 0, '窗口内没有缓存 → 退回只记录播放过的句子');
+
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  assert.equal(track.getCues().length, 1, '采样照旧，但不能因此认为骨架永远不会来');
+
+  // 官方此刻才把整条轨写进 storage
+  Object.assign(h.stored, officialCache(SKELETON_CUES));
+  h.emitLocal({ [`subtitle-cache:v6:${VIDEO_ID}:ja:primary`]: { newValue: { cues: SKELETON_CUES } } });
+  await h.drain();
+  await h.drain();
+
+  const cues = track.getCues();
+  assert.equal(cues.length, 4, '骨架 3 句 + 骨架里没有的那句采样（不能被丢掉）');
+  assert.equal(cues[0].primary, 'おはよう');
+  assert.equal(cues.some((cue) => cue.primary === 'テスト'), true);
+});
+
+test('字幕轨道：别的视频的缓存写入不许动当前轨道', async () => {
+  const { h, track } = await harness();
+  await h.drain();
+  await h.drain();
+
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+
+  const otherKey = 'subtitle-cache:v6:other999:ja:primary';
+  Object.assign(h.stored, officialCache(SKELETON_CUES, { videoId: 'other999' }));
+  h.emitLocal({ [otherKey]: { newValue: { cues: SKELETON_CUES } } });
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 1, '只有刚才采样到的那一句');
+  assert.equal(track.getCues()[0].primary, 'テスト');
+});
+
+test('字幕轨道：更短的骨架不许把已采用的整条轨缩回去', async () => {
+  const { h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+  assert.equal(track.getCues().length, 3);
+
+  // 官方重写了一份只有一句的缓存（重切/半截写入）
+  const key = `subtitle-cache:v6:${VIDEO_ID}:ja:primary`;
+  h.stored[key] = { cues: [SKELETON_CUES[0]], videoId: VIDEO_ID, primaryLang: 'ja', cachedAt: 2000 };
+  h.emitLocal({ [key]: { newValue: h.stored[key] } });
+  await h.drain();
+  await h.drain();
+
+  assert.equal(track.getCues().length, 3, '整条轨只能变长，不能被更短的缓存覆盖');
+});
+
+/**
  * 实测（本机 chrome.storage.local，2026-10-16）：官方索引里只有 13 条，而 storage 里躺着
  * 20 多条 subtitle-cache 值 —— **值比索引活得久**（索引有条数上限与 TTL，被挤掉的是索引条目，
  * 不是值）。索引里没有当前视频的条目时，如果就此放弃，轨道就只剩「播放过的句子」，
@@ -2011,428 +2128,8 @@ test('学习面板：把功能登记进设置面板注册表', async () => {
   for (const action of feature.actions) {
     assert.ok(action.id && action.title && action.icon, '操作行必须有 id / 标题 / 图标');
   }
-  assert.ok(feature.actions.some((a) => a.id === 'aiTranslate'), 'AI 翻译要有入口（PLAN 034）');
 });
 
-test('学习面板 AI 翻译：能打开设置层，没填 Key 时不发请求', async () => {
-  const { h } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  assert.equal(h.panelAct('aiTranslate'), true, '页脚的 AI 翻译按钮要能点到');
-  assert.equal(h.panelRole('sheet').dataset.state, 'open', '点开就是打开状态');
-
-  // 没 Key 就走不到 fetch：只提示，不抛错、不发请求
-  h.panelAct('aiRun');
-  await h.drain();
-  assert.match(h.panelRole('aiStatus').textContent, /API Key/);
-
-  assert.equal(h.panelAct('aiClose'), true);
-  assert.equal(h.panelRole('sheet').dataset.state, 'closed', '关闭后要收起来');
-  assert.equal(h.panelRole('panel').dataset.state, 'open', '关设置层不该把整个面板关掉');
-});
-
-test('学习面板 AI 翻译：逐批请求、按句贴回并打上导入优先级', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  h.currentTime = 1;
-  show(h, 'おはよう');
-  h.currentTime = 3;
-  show(h, 'ありがとう');
-  h.currentTime = 5;
-  show(h, 'さようなら');
-  assert.equal(track.getCues().length, 3);
-
-  // 桩 fetch：记下请求，并回一个与「待翻译」等长的 JSON 数组
-  const calls = [];
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    // user 内容是分段文本：从「待翻译」标签的下一行取出数组
-    const user = JSON.parse(options.body).messages[1].content;
-    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
-    const lines = texts.map((_, index) => `译文${index + 1}`);
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({ choices: [{ message: { content: JSON.stringify(lines) } }] }),
-    });
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 6; i += 1) await h.drain();
-
-  assert.equal(calls.length, 1, '三句一批就够，不该拆成多次请求');
-  assert.equal(calls[0].url, 'https://example.com/v1/chat/completions');
-  assert.equal(calls[0].options.headers.Authorization, 'Bearer sk-test');
-
-  const translated = track.getCues().filter((cue) => cue.secondary);
-  assert.equal(translated.length, 3, '三句都要贴上译文');
-  // 沙箱数组带着另一份原型，strict 的 deepEqual 会比原型 —— 拼成串再比
-  assert.equal(translated.map((cue) => cue.secondary).join('|'), '译文1|译文2|译文3');
-  assert.equal(translated[0].origin, 'imported', '贴回的译文要打上优先级标记');
-  assert.match(h.panelRole('aiStatus').textContent, /已贴 3 \/ 3 句/);
-  // 三句一段时没有前后文，但仍然要带「待翻译」标签（模型靠它区分哪段要翻）
-  assert.match(JSON.parse(calls[0].options.body).messages[1].content, /【待翻译/);
-});
-
-test('学习面板 AI 翻译：条数不符时改用编号格式重试，不整段报废', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 3; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-
-  const calls = [];
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    const messages = JSON.parse(options.body).messages;
-    const user = messages[1].content;
-    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
-    const reply = (content) => Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({ choices: [{ message: { content } }] }),
-    });
-
-    if (messages[0].content.includes('JSON 对象')) {
-      const keyed = {};
-      texts.forEach((text, index) => { keyed[String(index + 1)] = `译:${text}`; });
-      return reply(JSON.stringify(keyed));
-    }
-    // 第一次故意少一条：模拟模型把相邻两条合并了
-    return reply(JSON.stringify(texts.slice(0, texts.length - 1).map((text) => `译:${text}`)));
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 6; i += 1) await h.drain();
-
-  assert.equal(calls.length, 2, '第一次条数不符，换格式重试一次');
-  assert.match(JSON.parse(calls[1].options.body).messages[0].content, /JSON 对象/,
-    '重试要用编号对象格式');
-  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 3, '三句都要贴上');
-  assert.match(h.panelRole('aiStatus').textContent, /已贴 3 \/ 3 句/);
-});
-
-test('学习面板 AI 翻译：分多段时每段都带前后文（缩写的上下文）', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 23; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-  assert.equal(track.getCues().length, 23);
-
-  const calls = [];
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    const user = JSON.parse(options.body).messages[1].content;
-    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: JSON.stringify(texts.map((t) => `译:${t}`)) } }],
-      }),
-    });
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 8; i += 1) await h.drain();
-
-  assert.equal(calls.length, 2, '23 句按 20 + 3 切两段');
-  const first = JSON.parse(calls[0].options.body).messages[1].content;
-  const second = JSON.parse(calls[1].options.body).messages[1].content;
-
-  assert.match(first, /【后文｜只作参考，不要翻译，不要输出】\n\["句21"/, '第一段要看到后文');
-  assert.match(first, /【待翻译｜[^\n]*\n\["句1",/, '待翻译仍然从第一句开始');
-  assert.match(second, /【前文｜只作参考，不要翻译，不要输出】\n\["句1",.*"句20"\]/,
-    '第二段要看到前面的原文窗口（离它最近的一段）');
-  assert.ok(!second.includes('【后文'), '最后一段没有后文');
-
-  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 23);
-});
-
-test('学习面板 AI 翻译：勾选整片上下文后每次请求都带全片编号原文', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 30; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-
-  const calls = [];
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    const user = JSON.parse(options.body).messages[1].content;
-    const range = /【本次要翻译的条号】(\d+)-(\d+)/.exec(user);
-    const keyed = {};
-    for (let n = Number(range[1]); n <= Number(range[2]); n += 1) keyed[String(n)] = `译${n}`;
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: JSON.stringify(keyed) } }],
-      }),
-    });
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-  h.panelRole('aiWhole').checked = true;
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 8; i += 1) await h.drain();
-
-  assert.equal(calls.length, 2, '30 句 → 20 + 10，两段；整片模式不需要额外的语境整理');
-  const first = JSON.parse(calls[0].options.body).messages[1].content;
-  assert.match(first, /【全片字幕｜键是条号，只翻译第 1-20 条】/);
-  assert.match(first, /"30":"句30"/, '整片 30 句都要在里面');
-  assert.match(JSON.parse(calls[1].options.body).messages[1].content, /第 21-30 条/);
-
-  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 30);
-  assert.match(h.panelRole('aiStatus').textContent, /已贴 30 \/ 30 句/);
-});
-
-test('学习面板 AI 翻译：整片模式下条数不符仍留在整片重试，不退化成分段', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 6; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-
-  const calls = [];
-  const respond = (content) => Promise.resolve({
-    ok: true,
-    status: 200,
-    json: () => Promise.resolve({ choices: [{ message: { content } }] }),
-  });
-
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    // 第一次模拟「模型把两条合并了」：6 条只回 5 条
-    if (calls.length === 1) return respond(JSON.stringify(['译1', '译2', '译3', '译4', '译5']));
-
-    const user = JSON.parse(options.body).messages[1].content;
-    const range = /【本次要翻译的条号】(\d+)-(\d+)/.exec(user);
-    const keyed = {};
-    for (let n = Number(range[1]); n <= Number(range[2]); n += 1) keyed[String(n)] = `译${n}`;
-    return respond(JSON.stringify(keyed));
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-  h.panelRole('aiWhole').checked = true;
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 8; i += 1) await h.drain();
-
-  assert.equal(calls.length, 2, '失败一次后只重试一次');
-  const retryUser = JSON.parse(calls[1].options.body).messages[1].content;
-  assert.match(retryUser, /【全片字幕/, '重试仍带全片原文（不是退化成分段）');
-  assert.match(JSON.parse(calls[1].options.body).messages[0].content, /JSON 对象/,
-    '重试换成编号对象格式');
-  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 6);
-  assert.match(h.panelRole('aiStatus').textContent, /已贴 6 \/ 6 句/);
-});
-
-test('学习面板 AI 翻译：轨道被重建后按原文唯一匹配贴回', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 3; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-
-  let requests = 0;
-  sandbox.fetch = () => {
-    requests += 1;
-    // 模拟官方重新断句：翻译期间轨道整条被重建，start 全部挪了 4 秒
-    for (const cue of track.getCues()) cue.start += 4;
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: JSON.stringify(['译1', '译2', '译3']) } }],
-      }),
-    });
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 6; i += 1) await h.drain();
-
-  assert.equal(requests, 1, '文本能对上就不该重发请求');
-  assert.equal(track.getCues().map((cue) => cue.secondary).join('|'), '译1|译2|译3',
-    'start 变了也要按原文唯一匹配贴回');
-  assert.match(h.panelRole('aiStatus').textContent, /已贴 3 \/ 3 句/);
-});
-
-test('学习面板 AI 翻译：贴不上时原因不再停留在更早的解析失败', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 3; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-
-  const calls = [];
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    if (calls.length === 1) {
-      // 第一次条数不符 → 触发编号格式重试，同时把这句话记进 lastReason
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: JSON.stringify(['译1', '译2']) } }],
-        }),
-      });
-    }
-    // 重试拿到了合格格式，但轨道此刻已经换成另一部片的句子 → 一句都贴不上
-    for (const cue of track.getCues()) {
-      cue.start += 30;
-      cue.primary = `别的句子${cue.start}`;
-    }
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: JSON.stringify({ 1: '译1', 2: '译2', 3: '译3' }) } }],
-      }),
-    });
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 8; i += 1) await h.drain();
-
-  const status = h.panelRole('aiStatus').textContent;
-  assert.equal(calls.length, 2, '条数不符只重试一次');
-  assert.match(status, /3 句没翻成/, '三句都贴不上');
-  assert.match(status, /轨道上找不到对应原文/, '原因要说真实的那条');
-  assert.ok(!status.includes('条数不符'), '不能把更早那次解析失败当成最终原因');
-  assert.match(status, /原文轨在翻译期间变了/, '指纹变化要交代');
-});
-
-test('学习面板 AI 翻译：长轨道先整理全片语境，再逐段翻译', async () => {
-  const { sandbox, h, track } = await harness({ withPanel: true });
-  await h.drain();
-
-  h.togglePanel();
-  await h.drain();
-
-  for (let i = 0; i < 40; i += 1) {
-    h.currentTime = i * 2 + 1;
-    show(h, `句${i + 1}`);
-  }
-
-  const calls = [];
-  sandbox.fetch = (url, options) => {
-    calls.push({ url, options });
-    const user = JSON.parse(options.body).messages[1].content;
-    if (user.includes('【全片字幕')) {
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: '主题：闲聊。术语：丸ハラ=句号骚扰' } }],
-        }),
-      });
-    }
-    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: JSON.stringify(texts.map((t) => `译:${t}`)) } }],
-      }),
-    });
-  };
-
-  h.panelAct('aiTranslate');
-  h.panelRole('aiProvider').value = 'custom';
-  h.panelRole('aiBase').value = 'https://example.com/v1';
-  h.panelRole('aiModel').value = 'test-model';
-  h.panelRole('aiKey').value = 'sk-test';
-
-  h.panelAct('aiRun');
-  for (let i = 0; i < 12; i += 1) await h.drain();
-
-  assert.equal(calls.length, 3, '一次语境整理 + 两段翻译（40 句按 20 切）');
-  assert.match(JSON.parse(calls[0].options.body).messages[1].content, /【全片字幕｜按时间顺序】/);
-
-  const firstBatch = JSON.parse(calls[1].options.body).messages;
-  assert.match(firstBatch[0].content, /【全片语境/, '摘要要进 system');
-  assert.match(firstBatch[0].content, /丸ハラ=句号骚扰/, '术语译法要带进每一段');
-
-  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 40);
-});
 
 // ---------------------------------------------------------------- 桌面字幕常驻
 
@@ -2759,6 +2456,72 @@ test('桌面字幕：落盘里关掉的开关，下次加载不会被重新打�
   assert.equal(h.pip.requestCount, 0, '用户明确关过的东西不许自作主张打开');
 });
 
+// ---------------------------------------------------------------- 浮窗的滚轮动效
+
+/**
+ * 数一数 `#reel` 的滚轮动效被播了几次。
+ *
+ * `roll()` 的写法是 `delete dataset.roll; void offsetWidth; dataset.roll = dir`，
+ * 动画本身由 CSS 播、Node 侧看不到；所以这里把 `dataset` 换成计数 Proxy，
+ * 只统计「方向标记被真正打上」的次数 —— 那正是一次 `@keyframes` 重放的触发点。
+ */
+function countRolls(h) {
+  const win = h.lastPipWindow();
+  const reel = win && win.document.getElementById('reel');
+  if (!reel) return null;
+
+  const state = { count: 0 };
+  const store = {};
+  reel.dataset = new Proxy(store, {
+    get(target, key) {
+      return target[key];
+    },
+    set(target, key, value) {
+      if (key === 'roll' && value) state.count += 1;
+      target[key] = value;
+      return true;
+    },
+    deleteProperty(target, key) {
+      delete target[key];
+      return true;
+    },
+  });
+  return () => state.count;
+}
+
+/**
+ * PLAN 051 的回归：一句之内分步上屏不能重放滚轮动效。
+ *
+ * 旧实现的判据是时间轴 index：官方同一句先给原文、再补全、最后给译文，每一步都会
+ * 被采样成一条新 cue，index 连跳两三格 → `data-roll` 被连打两三次 → 整块字幕上下
+ * 抖两三次才切过去。这条用例在旧实现下会得到 2（第二次 show 就多滚一次）。
+ */
+test('桌面字幕：一句之内分步上屏只滚一次（不重复播放滚轮动效）', async () => {
+  const { h } = await harness({ withPip: true });
+
+  h.currentTime = 5;
+  show(h, 'あ', '');
+  h.gesture();
+  await h.drain();
+
+  const rolls = countRolls(h);
+  assert.ok(rolls, '浮窗里应该有 #reel');
+
+  h.currentTime = 7;
+  show(h, 'い', ''); // 真换句 → 滚第 1 次
+  assert.equal(rolls(), 1);
+
+  h.currentTime = 7.1;
+  show(h, 'いう', ''); // 同一句补全（旧文本是它的前缀）→ 不许再滚
+  h.currentTime = 7.2;
+  show(h, 'いう', '言う'); // 译文后到 → 不许再滚
+  assert.equal(rolls(), 1, '一句之内只滚一次');
+
+  h.currentTime = 9;
+  show(h, 'う', ''); // 真的又换了一句 → 滚第 2 次
+  assert.equal(rolls(), 2, '换句仍然要滚（不能为了防抖把动效整个干掉）');
+});
+
 // ---------------------------------------------------------------- 浮窗的进度与分隔符
 
 const SEGMENTED = '昨日\u2009|\u2009買った\u2009|\u2009本を\u2009|\u2009読む';
@@ -2979,7 +2742,7 @@ test('桌面字幕：观看模式逐字段夹取，说明行按官方中文片�
     '原文行用模糊隐藏。该行结束后暂停，直到你自己继续播放。把鼠标移到该行或暂停视频即可看到。');
 });
 
-test('桌面字幕：旧的 llgPipAppearance 只迁移上下文行数，外观字段一律忽略', async () => {
+test('桌面字幕：旧的平铺 llgPipAppearance 只迁移上下文行数，平铺外观字段一律忽略', async () => {
   const { sandbox, h } = await harness({
     withPip: true,
     settings: withAppearance({ subtitleScale: 150 }),
@@ -2990,7 +2753,12 @@ test('桌面字幕：旧的 llgPipAppearance 只迁移上下文行数，外观�
   const pip = sandbox.__llgModPip;
   await h.drain();
 
-  assert.deepEqual({ ...pip.pipOption() }, { ctxLines: 2 }, '只迁移 ctxLines');
+  // PLAN 047：浮窗有了自己的外观格（pip / panel / page），但**旧版平铺字段**不进这一格
+  const own = pip.pipOption();
+  assert.equal(own.ctxLines, 2, '旧版的 ctxLines 继续迁移');
+  assert.equal(own.pip.scale, null, '旧版平铺 scale 不迁移（null = 跟随官方）');
+  assert.equal(own.pip.color, null, '旧版平铺 color 不迁移');
+  assert.equal(own.pip.glass, 'regular', '玻璃质感走默认档');
   // 150% → 基座 36，原文行 36 × 27/24 = 40.5
   assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/, '字号来自官方，不是旧落盘');
   assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #FFFFFF/, '颜色也来自官方');
@@ -3426,10 +3194,11 @@ test('桌面字幕：分隔符是独立节点，观感与视频内那套一致',
     ['昨日', '買った', '本を', '読む'],
     '文节自己不带分隔符',
   );
+  // PLAN 047：视频内与浮窗改用同一组数值（旧值是视频内 .14/.42、浮窗 .16/.2）
   assert.match(
     h.pipCss(),
-    /\.llg-sep \{ margin: 0 \.16em; opacity: \.2; font-weight: 400; \}/,
-    '分隔符跟随 15-ja-break.js 的观感，PLAN 035 再压淡一档',
+    /\.llg-sep \{ margin: 0 \.15em; opacity: \.34; font-weight: 400; \}/,
+    '分隔符与 15-ja-break.js 用同一组数值',
   );
 });
 
@@ -3479,6 +3248,136 @@ test('桌面字幕：浮窗进度条按新的分母走', async () => {
   h.currentTime = 13;
   h.tick();
   assert.equal(h.pipFill(), 'scaleX(0.5)', '3 / 6，而不是旧实现的 100%');
+});
+
+/**
+ * PLAN 053：一句只显示整句，且进度按整句算。
+ *
+ * 画面还停在半句时，轨道已经把同一句补全了 —— 浮窗直接用整句；
+ * 进度判据也不能再把「轨道整句 vs 画面半句」当成不同步而返回 0。
+ */
+test('桌面字幕：同一句分步上屏时提前显示整句，句内进度按整句走', async () => {
+  const { h } = await harness({ withPip: true });
+  h.jaBreakEnabled = false;
+
+  h.currentTime = 5;
+  show(h, 'あの', '');
+  h.gesture();
+  await h.drain();
+  assert.equal(h.pipText(), 'あの');
+
+  h.currentTime = 5.4;
+  show(h, 'あの、そうですね', '');
+  await h.drain();
+  assert.equal(h.pipText(), 'あの、そうですね', '画面只有半句时，浮窗也要给出整句');
+
+  h.tick();
+  const fill = h.pipFill();
+  const ratio = Number(/scaleX\(([\d.]+)\)/.exec(fill)[1]);
+  assert.ok(ratio > 0, `进度不该被半句判成 0（实际 ${fill}）`);
+});
+
+// ---------------------------------------------------------------- 浮窗上下滑动选句
+
+/** 在浮窗里滚一格（deltaY 像素）；返回事件对象，便于断言有没有 preventDefault */
+function wheelPip(h, deltaY, deltaMode = 0) {
+  const win = h.lastPipWindow();
+  const ev = {
+    deltaY,
+    deltaMode,
+    cancelable: true,
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+  };
+  for (const fn of [...((win && win.document.handlers.wheel) || [])]) fn(ev);
+  return ev;
+}
+
+test('桌面字幕：滚轮上滑选到更早的句子，停手后跳过去', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  h.currentTime = 0;
+  show(h, 'あ', '啊');
+  h.currentTime = 4;
+  show(h, 'い', '咿');
+  h.currentTime = 8;
+  show(h, 'う', '呜');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+  assert.equal(pip.isOpen(), true);
+
+  const win = h.lastPipWindow();
+  const picker = win.document.getElementById('picker');
+  const rows = win.document.getElementById('picker-rows');
+
+  // 上滑一格（-60px）→ 从当前句「う」退到「い」
+  const ev = wheelPip(h, -60);
+  assert.equal(ev.prevented, true, '浮窗里的滚动不该落到默认行为上');
+  assert.equal(picker.getAttribute('aria-hidden'), 'false', '滑动时浮层要出来');
+  assert.equal(rows.children.length, 5, '选中句前后各 2 句');
+  assert.equal(rows.children[2].textContent, 'い', '中间那行是选中句');
+  assert.equal(h.currentTime, 8, '停手之前不许跳');
+
+  h.runTimers();
+  assert.equal(h.currentTime, 4, '停手 300ms 后跳到「い」的开头');
+  assert.equal(picker.getAttribute('aria-hidden'), 'true', '跳完收起浮层');
+});
+
+test('桌面字幕：滚轮选句夹在轨道首尾，跳完再从新句起算', async () => {
+  const { h } = await harness({ withPip: true });
+
+  h.currentTime = 0;
+  show(h, 'あ', '啊');
+  h.currentTime = 4;
+  show(h, 'い', '咿');
+  h.currentTime = 8;
+  show(h, 'う', '呜');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+
+  // 一口气往上滑很远：夹在第 0 句，不会滚出轨道
+  wheelPip(h, -600);
+  h.runTimers();
+  assert.equal(h.currentTime, 0, '最多退到第一句');
+
+  // 跳到第一句之后马上再往下滑：从「刚跳到的那句」起算，而不是等轨道的心跳更新
+  wheelPip(h, 60);
+  h.runTimers();
+  assert.equal(h.currentTime, 4, '第二句（4s）');
+
+  // 往下到底：夹在最后一句
+  wheelPip(h, 600);
+  h.runTimers();
+  assert.equal(h.currentTime, 8, '最多进到最后一句');
+});
+
+test('桌面字幕：设置页里滚轮不接管选句', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+
+  h.currentTime = 0;
+  show(h, 'あ', '啊');
+  h.currentTime = 4;
+  show(h, 'い', '咿');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+  pip.command('appearance');
+  assert.equal(pip.barMode(), 'root', 'Aa 打开的是设置首页');
+
+  const win = h.lastPipWindow();
+  const picker = win.document.getElementById('picker');
+  const ev = wheelPip(h, -120);
+  assert.equal(ev.prevented, false, '设置页自己要能滚');
+  assert.equal(picker.getAttribute('aria-hidden'), 'true', '设置页里不该弹选句浮层');
 });
 
 // ---------------------------------------------------------------- 手机字幕屏
@@ -3603,6 +3502,36 @@ test('桌面字幕：档位拉到 2 时上一句也显示，并带上它刚采�
   assert.equal(pip.contextText(-99), null);
 });
 
+/**
+ * PLAN 053：用户要求「上一句 / 下一句也必须是完整句」。
+ * 上一句曾经是半句时，合并后的轨道句应该完整地出现在上下文行里。
+ */
+test('桌面字幕：合并后的整句会作为完整的上一句出现', async () => {
+  const { h } = await harness({
+    withPip: true,
+    settings: APPEARANCE,
+    stored: {
+      llgPipAppearance: { style: 'classic', scale: 100, color: '#FFFFFF', dual: true, ctxLines: 2 },
+    },
+  });
+  h.jaBreakEnabled = false;
+  await h.drain();
+
+  h.currentTime = 5;
+  show(h, 'あの', '');
+  h.currentTime = 5.3;
+  show(h, 'あの、そうですね', '');
+  h.currentTime = 9;
+  show(h, '次の句です', '');
+  await h.drain();
+
+  h.gesture();
+  await h.drain();
+
+  assert.equal(h.pipText(), '次の句です');
+  assert.equal(h.pipLineText('prev-primary'), 'あの、そうですね', '上一句必须是整句，不能停在半句');
+});
+
 test('桌面字幕：上下文行循环 0/1/2 并落盘，0 时两段都收起来', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
   const pip = sandbox.__llgModPip;
@@ -3625,8 +3554,12 @@ test('桌面字幕：上下文行循环 0/1/2 并落盘，0 时两段都收起�
   assert.equal(pip.pipOption().ctxLines, 2);
   assert.equal(h.pipButton('prev').style.display, '', '2 段：上一句要出来');
   assert.equal(h.saved.at(-1).llgPipAppearance.ctxLines, 2, '改一下就要落盘');
-  assert.deepEqual(Object.keys(h.saved.at(-1).llgPipAppearance), ['ctxLines'],
-    '浮窗这一份只存 ctxLines，不再存外观');
+  // PLAN 047：三个显示位置各有自己的一格；ctxLines 仍是浮窗那一格的字段
+  assert.deepEqual(
+    Object.keys(h.saved.at(-1).llgPipAppearance).sort(),
+    ['ctxLines', 'page', 'panel', 'pip'],
+    '落盘按显示位置分组',
+  );
 
   h.pipClick('ctx'); // 2 → 0
   assert.equal(pip.pipOption().ctxLines, 0);
@@ -3669,9 +3602,10 @@ test('桌面字幕：换句时给滚轮动效打方向标记，改外观不滚',
   h.tick();
   assert.equal(reel.dataset.roll, 'up', '前进 = 从下往上推');
 
-  // 往回调 → 反向
+  // 往回调 → 反向。真实播放里 YouTube 会把画面重渲染成目标那一句，所以这里要同步
+  // 更新字幕文本：PLAN 051 起动效跟着「屏幕上这句原文换了」走，画面不动就不该滚。
   h.currentTime = 3;
-  h.tick();
+  show(h, 'きょうは あめ です', '今天下雨');
   assert.equal(reel.dataset.roll, 'down', '后退 = 从上往下推');
 
   // 改外观（不换句）不该滚：方向标记保持原样，不重新触发
@@ -3680,7 +3614,7 @@ test('桌面字幕：换句时给滚轮动效打方向标记，改外观不滚',
 
   // 同一个方向连续换句也要能重放：标记被删掉再打回来（动画名不会自己重来）
   h.currentTime = 7;
-  h.tick();
+  show(h, 'あしたは はれ です', '明天是晴天');
   assert.equal(reel.dataset.roll, 'up');
   assert.match(h.pipCss(), /#reel\[data-roll="up"\] \{ animation: llg-roll-up/);
   assert.match(h.pipCss(), /@media \(prefers-reduced-motion: reduce\) \{\s*#reel\[data-roll\] \{ animation: none; \}/,
@@ -3877,6 +3811,139 @@ test('桌面字幕：浮窗控制栏的点击委托与状态回显', async () =>
   // 没有 video 时不能抛
   sandbox.document.querySelector = () => null;
   assert.equal(pip.command('toggle'), false);
+});
+
+// ---------------------------------------------------------------- 设计语言（PLAN 047）
+
+/** 在桩件节点树里按 data-act 找控件 */
+function findAct(node, act) {
+  if (!node || !node.children) return null;
+  for (const kid of node.children) {
+    if (kid && kid.dataset && kid.dataset.act === act) return kid;
+    const found = findAct(kid, act);
+    if (found) return found;
+  }
+  return null;
+}
+
+test('外观（PLAN 047）：默认显示「视频内」分组，字号控件与数值都在', async () => {
+  const { h } = await harness({ withPip: true, settings: APPEARANCE });
+  await h.drain();
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  h.gesture();
+  await h.drain();
+  h.pipClick('appearance');
+  h.pipClick('page:appearance');
+
+  const win = h.lastPipWindow();
+  const pageGroup = win.document.getElementById('llg-appearance-page');
+  const pipGroup = win.document.getElementById('llg-appearance-pip');
+  assert.ok(pageGroup, '外观页要有「视频内」分组');
+  assert.notEqual(pageGroup.style.display, 'none', '默认显示视频内分组');
+  assert.equal(pipGroup.style.display, 'none', '其余分组默认收起');
+
+  // 字号：两个按钮都在，并且旁边有数值（上一版只有图标，看起来像「没了」）
+  assert.ok(findAct(pageGroup, 'scale-'), '视频内要有 A−');
+  assert.ok(findAct(pageGroup, 'scale+'), '视频内要有 A+');
+  assert.ok(findAct(pageGroup, 'color:#FFFFFF'), '颜色板也在这一组');
+
+  h.pipClick('target:pip');
+  assert.equal(pageGroup.style.display, 'none', '切到浮窗后视频内收起');
+  assert.notEqual(pipGroup.style.display, 'none', '浮窗分组展开');
+  assert.ok(findAct(pipGroup, 'scale+:pip'), '浮窗有自己的 A+');
+});
+
+test('外观（PLAN 047）：三个显示位置各自独立，字号互不写串', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  h.gesture();
+  await h.drain();
+  h.pipClick('appearance');
+  h.pipClick('page:appearance');
+
+  // 默认停在「视频内」：字号仍然写官方设置
+  h.pipClick('scale+');
+  await h.drain();
+  assert.equal(pip.official().subtitleScale, 110, '视频内字号写官方设置');
+
+  // 切到浮窗：从此刻起只写自己那一格
+  h.pipClick('target:pip');
+  h.pipClick('scale+:pip');
+  await h.drain();
+  assert.equal(pip.official().subtitleScale, 110, '浮窗字号不许再改官方');
+  assert.equal(pip.pipOption().pip.scale, 120, '浮窗从当前生效值（官方 110）继续往上走');
+  // 120% → 基座 28.8，原文行 28.8 × 27/24 = 32.4
+  assert.match(h.pipCss(), /#line-primary \{[^}]*font-size: 32\.4px/, '浮窗立刻用自己的字号');
+
+  // 学习面板同样独立
+  h.pipClick('target:panel');
+  h.pipClick('scale+:panel');
+  await h.drain();
+  assert.equal(pip.pipOption().panel.scale, 110, '学习面板有自己的字号');
+  assert.equal(pip.pipOption().pip.scale, 120, '两处各留各的值');
+});
+
+test('外观（PLAN 047）：玻璃质感三档落到浮窗样式，并向设置页回显', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+  await h.drain();
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  h.gesture();
+  await h.drain();
+  h.pipClick('appearance');
+  h.pipClick('page:appearance');
+  h.pipClick('target:pip');
+
+  assert.equal(pip.pipOption().pip.glass, 'regular');
+  assert.match(h.pipCss(), /background: var\(--llg-glass-regular\)/);
+  h.pipClick('glass:pip');
+  assert.equal(pip.pipOption().pip.glass, 'thick');
+  assert.match(h.pipCss(), /background: var\(--llg-glass-thick\)/);
+
+  // 三档令牌都在样式表里（浮窗文档没有外部变量表，必须自带）
+  for (const level of ['thin', 'regular', 'thick']) {
+    assert.match(h.pipCss(), new RegExp(`--llg-glass-${level}:`), `${level} 档要有令牌`);
+  }
+});
+
+test('学习面板（PLAN 047）：玻璃与字号用自己那一格，不跟随浮窗', async () => {
+  const { h } = await harness({
+    withPanel: true,
+    stored: {
+      llgPipAppearance: { pip: { glass: 'thin' }, panel: { glass: 'thick', scale: 130 } },
+    },
+  });
+  await h.drain();
+  h.togglePanel();
+  await h.drain();
+
+  const panel = h.panelRole('panel');
+  assert.equal(panel.dataset.glass, 'thick', '学习面板用自己的玻璃档');
+  assert.equal(panel.dataset.scale, 'large', '130% 落到 large 档');
+});
+
+test('视频内（PLAN 047）：分隔符三档只换样式，不重算切点', async () => {
+  const { sandbox } = await harness({});
+  // 这里要测真模块（harness 默认给的是只含 SEPARATOR 的桩）。
+  // 15 有幂等守卫（已存在就 return），所以先把桩删掉再加载。
+  delete sandbox.__llgModJaBreak;
+  // 桩里的官方字幕宿主不是真 DOM（root 没有 prepend），这个用例只测样式文本，关掉注入
+  sandbox.document.getElementById = () => null;
+  vm.runInContext(await sourceOf('15-ja-break.js'), sandbox, { filename: '15-ja-break.js' });
+  const ja = sandbox.__llgModJaBreak;
+
+  assert.equal(ja.separator(), 'bar');
+  assert.match(ja.markup(), /content: "\|"/);
+  ja.setSeparator('dot');
+  assert.equal(ja.separator(), 'dot');
+  assert.match(ja.markup(), /content: "·"/);
+  ja.setSeparator('none');
+  assert.match(ja.markup(), /content: none/);
 });
 
 test('学习面板：玻璃令牌都有定义，且不引用拿不到的官方变量', async () => {
@@ -4123,6 +4190,121 @@ test('共享心跳：五个模块共用同一个 1s 定时器，回调抛错不�
   assert.deepEqual(order, ['b'], '注销后只剩没注销的那个');
   assert.equal(intervals.length, 1, '回调来去都不该反复重开定时器');
 });
+// ---------------------------------------------------------------- 复制时剥掉振假名（PLAN 050）
+
+/**
+ * 这一条用的是**真正的** 00-shared.js：复制清道夫装在全局 `copy` 事件上，
+ * harness 里的 shared 是桩，测不到真实实现。
+ *
+ * 桩件只需要「一串按顺序的节点」——`cloneContents()` 的返回值本身就是这个形状，
+ * 不需要选择器引擎。
+ */
+async function copySandbox() {
+  const handlers = [];
+  const document = {
+    getElementById: () => null,
+    addEventListener: (type, fn) => {
+      if (type === 'copy') handlers.push(fn);
+    },
+    getSelection: () => null,
+  };
+  const sandbox = {
+    console,
+    document,
+    setInterval: () => 0,
+    clearInterval: () => {},
+  };
+  sandbox.window = sandbox;
+
+  const context = vm.createContext(sandbox);
+  vm.runInContext(await sourceOf('00-shared.js'), context, { filename: '00-shared.js' });
+  return { shared: sandbox.__llgModShared, handlers };
+}
+
+const copyTextNode = (data) => ({ nodeType: 3, data, childNodes: [] });
+const copyElem = (nodeName, className, childNodes) => ({
+  nodeType: 1,
+  nodeName,
+  className,
+  childNodes,
+});
+const copyFragment = (childNodes) => ({ nodeName: '#fragment', childNodes });
+
+/** 造一个带 sel 的假窗口，返回它收到的 copy 监听器 */
+function copyWindow(selection) {
+  const handlers = {};
+  const win = {
+    getSelection: () => selection,
+    addEventListener: (type, fn) => {
+      if (!handlers[type]) handlers[type] = [];
+      handlers[type].push(fn);
+    },
+  };
+  return { win, handlers };
+}
+
+function fireCopy(handlers) {
+  const calls = [];
+  let prevented = false;
+  for (const fn of handlers.copy || []) {
+    fn({
+      clipboardData: { setData: (type, value) => calls.push([type, value]) },
+      preventDefault: () => {
+        prevented = true;
+      },
+    });
+  }
+  return { calls, prevented };
+}
+
+test('复制：选区里的振假名与文节分隔符不会进入剪贴板', async () => {
+  const { shared } = await copySandbox();
+  assert.equal(typeof shared.installCopySanitizer, 'function', '00-shared.js 要导出复制清道夫');
+
+  const ruby = copyElem('RUBY', '', [
+    copyTextNode('色々'),
+    copyElem('RT', '', [copyTextNode('いろいろ')]),
+  ]);
+  const sep = copyElem('SPAN', 'llg-sep', [copyTextNode('|')]);
+  const fragment = copyFragment([
+    ruby,
+    copyTextNode('な'),
+    sep,
+    copyTextNode('テーマについて'),
+  ]);
+  const selection = {
+    isCollapsed: false,
+    rangeCount: 1,
+    getRangeAt: () => ({ cloneContents: () => fragment }),
+  };
+
+  const { win, handlers } = copyWindow(selection);
+  shared.installCopySanitizer(win);
+  assert.equal(handlers.copy.length, 1, 'copy 监听要挂上（且只挂一次）');
+
+  const { calls, prevented } = fireCopy(handlers);
+  assert.equal(prevented, true, '含注音时要接管这次复制');
+  assert.deepEqual(calls, [['text/plain', '色々なテーマについて']],
+    '粘出来的只有原文：没有「いろいろ」，也没有分隔符');
+});
+
+test('复制：不含注音 / 分隔符的选区不接管，保持浏览器原生行为', async () => {
+  const { shared } = await copySandbox();
+
+  const selection = {
+    isCollapsed: false,
+    rangeCount: 1,
+    getRangeAt: () => ({ cloneContents: () => copyFragment([copyTextNode('ただの文')]) }),
+  };
+
+  const { win, handlers } = copyWindow(selection);
+  shared.installCopySanitizer(win);
+
+  const { calls, prevented } = fireCopy(handlers);
+  assert.equal(prevented, false, '普通复制不许被拦（换行与富文本粘贴都靠原生行为）');
+  assert.deepEqual(calls, [], '也不要自己写剪贴板');
+});
+
 // ---------------------------------------------------------------- 导入译文（PLAN 031）
 
 /**
@@ -4283,4 +4465,51 @@ test('导出原文 SRT：单语、干净，不带译文那一行', async () => {
   const linesPerBlock = blocks.map((block) => block.split('\n').filter(Boolean));
   assert.equal(linesPerBlock.every((lines) => lines.length === 3), true,
     '每段恒为「序号 / 时间轴 / 一行原文」');
+});
+
+/**
+ * PLAN 052：长难句重新断句后，用文件直接替换整条轨道。
+ *
+ * 关键不是「能不能写进去」，而是**写进去之后骨架不许反悔** —— 官方缓存晚到时
+ * `onStorageChanged` 会重置骨架状态，如果不拦住，用户刚断好的句子会被整片覆盖。
+ */
+test('整条轨道替换：句数与时间轴按文件来，骨架晚到也不能覆盖', async () => {
+  const { h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+  assert.equal(track.getCues().length, 3, '先确认骨架已采用');
+
+  const result = await track.replaceCues([
+    { start: 10, end: 13, primary: '一句', secondary: '第一句' },
+    { start: 20, end: 22, primary: '二句', secondary: '第二句' },
+  ]);
+  await h.drain();
+
+  assert.equal(result.applied, 2);
+  const cues = track.getCues();
+  assert.equal(cues.length, 2, '句数按文件来，而不是原轨的 3 句');
+  assert.equal(cues[0].start, 10);
+  assert.equal(cues[0].end, 13);
+  assert.equal(cues[0].secondary, '第一句');
+  assert.equal(cues[0].origin, 'imported');
+  assert.equal(track.getMeta()?.import?.wholeTrack, true);
+
+  // 官方整条缓存此刻才写完：不许把文件断句覆盖回去
+  h.emitLocal({ [`subtitle-cache:v6:${VIDEO_ID}:ja:primary`]: { newValue: { cues: SKELETON_CUES } } });
+  await h.drain();
+  await h.drain();
+  assert.equal(track.getCues().length, 2, '整条轨导入后，骨架事件必须被忽略');
+  assert.equal(track.getCues()[0].secondary, '第一句');
+});
+
+test('整条轨道替换：空文件不动原轨道', async () => {
+  const { h, track } = await harness({ stored: officialCache(SKELETON_CUES) });
+  await h.drain();
+  await h.drain();
+  const before = track.getCues().length;
+
+  const result = await track.replaceCues([]);
+
+  assert.equal(result.applied, 0);
+  assert.equal(track.getCues().length, before, '空/坏文件必须原样保留');
 });

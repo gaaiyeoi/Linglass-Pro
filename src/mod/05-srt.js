@@ -59,7 +59,7 @@
    * @param {string} text
    * @returns {Array<{start: number, end: number, text: string}>} 按 start 升序
    */
-  function parseSrt(text) {
+  function parseSrtBlocks(text) {
     if (typeof text !== 'string' || !text) return [];
 
     const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
@@ -80,14 +80,26 @@
       if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
 
       // 整块文本当译文；多行拼成一行（浮窗与面板都是单行渲染）
-      const body = lines.slice(cursor).join(' ').trim();
+      const bodyLines = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
+      const body = bodyLines.join(' ').trim();
       if (!body) continue;
 
-      out.push({ start, end, text: body });
+      // `lines` 给「整条轨道导入」用：第一行原文、其余行译文（PLAN 052）
+      out.push({ start, end, text: body, lines: bodyLines });
     }
 
     out.sort((a, b) => a.start - b.start);
     return out;
+  }
+
+  /**
+   * 只吃文本的投影（PLAN 031 起的公开结构：start / end / text）。
+   *
+   * 保持它是投影而不是另写一套解析：`parseSrt` 的输出被导入、测试和面板共用，
+   * 多出来的 `lines` 字段会破坏 strict deepEqual 的既有断言。
+   */
+  function parseSrt(text) {
+    return parseSrtBlocks(text).map(({ start, end, text: body }) => ({ start, end, text: body }));
   }
 
   /** 轨道句在时间轴上的结束点（没定稿就按默认时长兜一个） */
@@ -180,7 +192,14 @@
   }
 
   Object.defineProperty(globalThis, NS, {
-    value: { parseSrt, planImport, fingerprint, sameFingerprint, DEFAULT_TOLERANCE },
+    value: {
+      parseSrt,
+      parseSrtBlocks,
+      planImport,
+      fingerprint,
+      sameFingerprint,
+      DEFAULT_TOLERANCE,
+    },
     configurable: true,
   });
 })();

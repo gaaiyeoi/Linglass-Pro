@@ -77,6 +77,7 @@
   'use strict';
 
   const shared = globalThis.__llgModShared;
+  const design = shared && shared.design;
   const track = globalThis.__llgModTrack;
   if (!shared || !track) {
     console.error('[llg-pip] 共享模块未加载（检查 src/mod 数字前缀与加载顺序）');
@@ -148,6 +149,18 @@
   const SEEK_STEP = 5;
   /** 上一句：播到句中超过这么久时，先把本句拉回开头，再按一次才是上一句 */
   const RESTART_CUE_AFTER = 1;
+  /**
+   * 滚轮 / 触控板上下滑动选句（PLAN 049，对齐手机字幕屏的 PLAN 045）：
+   * 每滑这么多像素换一句。手机端是 46px（手指在一屏里的位移），桌面滚轮一格约 100px，
+   * 所以这里取 60 —— 一格滚轮跳一两句，触控板轻扫也不会一下飞出去。
+   */
+  const PICK_ROW_PX = 60;
+  /** 停手这么久之后才真的跳（与手机端同值）：触控板惯性期间选中项还要继续走 */
+  const PICK_COMMIT_MS = 300;
+  /** 选句浮层只画选中句前后各 2 句（与手机端一致） */
+  const PICK_ROWS_AROUND = 2;
+  /** 刚跳完的一小段时间内再滚，从「刚跳到的那句」起算（轨道里的当前句可能还没跟上） */
+  const PICK_ANCHOR_MS = 2000;
   /** 只在播放/暂停/倍速变化时重画控制栏，这几个事件类型就够了 */
   const VIDEO_STATE_EVENTS = ['play', 'pause', 'ratechange'];
 
@@ -199,13 +212,42 @@
   /** 官方设置的落盘键（chrome.storage.sync） */
   const SETTINGS_KEY = 'linglass-settings';
 
-  /** 浮窗自己的设置落盘键（chrome.storage.local）：现在只存 { ctxLines } */
+  /**
+   * 我们自己的外观设置落盘键（chrome.storage.local）。
+   *
+   * PLAN 047 起按「显示位置」分开存：
+   *   { ctxLines, page: { sep }, pip: { glass, scale, color }, panel: { glass, scale } }
+   *
+   * 三个位置互不牵连：视频内字幕仍然是官方设置（我们只额外控制断句分隔符），
+   * 浮窗与学习面板各有自己的玻璃档位与字号。`pip.scale` / `pip.color` 为 null
+   * 表示「跟随官方」—— 旧用户升级后观感不变。
+   */
   const APPEARANCE_KEY = 'llgPipAppearance';
 
   /** 字号档位（与官方同一套：50–150、step 10，省得用户学两套） */
   const SCALE_MIN = 50;
   const SCALE_MAX = 150;
   const SCALE_STEP = 10;
+
+  /** 玻璃质感三档（与 00-shared.js 的 GLASS_LEVELS 同值同序） */
+  const GLASS_CHOICES = ['thin', 'regular', 'thick'];
+  const GLASS_LABELS = { thin: '清透', regular: '磨砂', thick: '深邃' };
+  const GLASS_DESCS = {
+    thin: '几乎透明的玻璃，背景越清晰越像贴在桌面上',
+    regular: '默认的磨砂玻璃，兼顾可读性与氛围',
+    thick: '深色不透明，强光环境下最稳',
+  };
+
+  /** 视频内句内分隔符三档（15-ja-break.js 读同一个键） */
+  const SEP_CHOICES = ['bar', 'dot', 'none'];
+  const SEP_LABELS = { bar: '竖线', dot: '圆点', none: '关闭' };
+
+  /** 外观页的三个调整位置（顺序就是分段控件里的顺序） */
+  const APPEARANCE_TARGETS = [
+    { id: 'page', label: '视频内' },
+    { id: 'pip', label: '桌面浮窗' },
+    { id: 'panel', label: '学习面板' },
+  ];
 
   /** 官方四个预设：顺序就是面板里的瓷砖顺序 */
   const STYLE_CHOICES = ['classic', 'cinema', 'comic', 'contrast'];
@@ -522,15 +564,40 @@
     }
   }
 
+  /** 玻璃档位的脏值兜底 */
+  function glassChoiceOf(value, fallback) {
+    return GLASS_CHOICES.includes(value) ? value : fallback;
+  }
+
   /**
-   * 浮窗自己那份设置（chrome.storage.local）。
+   * 我们自己的那份设置（chrome.storage.local）。
    *
-   * 旧版本在这里存过 style/scale/color/dual —— 现在外观以官方设置为唯一真相，
-   * 那四项一律忽略，只迁移 ctxLines（缺省/写坏都走默认）。
+   * 旧版本在这里存过 style/scale/color/dual，PLAN 033 起外观以官方设置为唯一真相，
+   * 那四项被忽略。PLAN 047 又把浮窗的外观拿回来一部分（玻璃 / 字号 / 颜色）——
+   * 但一律以嵌套结构存，平铺的旧字段继续忽略，只迁移 ctxLines。
    */
   function parseOwn(raw) {
     if (!raw || typeof raw !== 'object') return null;
-    return { ctxLines: clampCtxLines(raw.ctxLines) };
+    const pip = raw.pip && typeof raw.pip === 'object' ? raw.pip : {};
+    const panel = raw.panel && typeof raw.panel === 'object' ? raw.panel : {};
+    const page = raw.page && typeof raw.page === 'object' ? raw.page : {};
+    return {
+      ctxLines: clampCtxLines(raw.ctxLines),
+      pip: {
+        glass: glassChoiceOf(pip.glass, 'regular'),
+        scale: Number.isFinite(pip.scale) ? clampScale(pip.scale) : null,
+        color: typeof pip.color === 'string' && HEX_COLOR.test(pip.color)
+          ? pip.color.toUpperCase()
+          : null,
+      },
+      panel: {
+        glass: glassChoiceOf(panel.glass, 'regular'),
+        scale: Number.isFinite(panel.scale) ? clampScale(panel.scale) : 100,
+      },
+      page: {
+        sep: SEP_CHOICES.includes(page.sep) ? page.sep : 'bar',
+      },
+    };
   }
 
   /**
@@ -875,10 +942,15 @@
    */
   const PIP_BASE_CSS = `
 :root { color-scheme: dark; }
-/* 深灰蓝而不是纯黑：纯黑在暗环境里与桌面边界糊在一起，稍微提一点更像一块「面板」 */
-html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
+/* 深灰蓝而不是纯黑：纯黑在暗环境里与桌面边界糊在一起，稍微提一点更像一块「面板」。
+   PLAN 047：表面材质交给 --llg-glass-*（见 pipCss 里的 glassSurfaceCss），这里只留
+   一层不透明兜底 —— 系统 PiP 窗口没有「透到桌面」的能力，玻璃感靠渐变高光 + 细描边
+   模拟，不假装真的透明。 */
+html { background: #0B0C0F; }
+html, body { height: 100%; margin: 0; overflow: hidden;
   -webkit-font-smoothing: antialiased; }
-#box { height: 100%; min-width: 0; display: flex; flex-direction: column; box-sizing: border-box; }
+#box { height: 100%; min-width: 0; display: flex; flex-direction: column; box-sizing: border-box;
+  position: relative; }
 #stage { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; padding: 10px 16px 0; gap: 10px; }
 .kline { position: relative; display: inline-block; max-width: 100%; min-width: 0; }
@@ -888,9 +960,9 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
    rAF 以 60fps 驱动（与 tools/cast-page.mjs 的 paintProgress 同一口径）。 */
 .kfill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%;
   transform: scaleX(0); transform-origin: left center;
-  border-radius: var(--radius-sm, 8px); }
-#fill-primary { background: rgba(10, 132, 255, .16); }
-#fill-secondary { background: rgba(10, 132, 255, .11); }
+  border-radius: var(--llg-r-sm); }
+#fill-primary { background: var(--llg-accent-soft); }
+#fill-secondary { background: var(--llg-accent-softer); }
 /* 长句折行（PLAN 045）：line-break: strict 按日文禁则断行（不让小假名 / 开括号 / 标点
    落在行首）；balance 让折两行时长度接近，而不是「第一行满、第二行两个字」 */
 #line-primary, #line-secondary { position: relative; display: block;
@@ -919,30 +991,47 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
 @media (prefers-reduced-motion: reduce) {
   #reel[data-roll] { animation: none; }
 }
+/* 上下滑动选句（PLAN 049）：覆在字幕区上的小浮层，只画选中句 ±2 行 + 时间。
+   与手机端 PLAN 045 的 #picker 同一套排法；不接指针事件，免得挡住上下文行的点击。 */
+#picker { position: absolute; inset: 0; display: none; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px; padding: 8px 12px;
+  background: var(--llg-glass-thick);
+  -webkit-backdrop-filter: var(--llg-blur-thick);
+  backdrop-filter: var(--llg-blur-thick);
+  border-radius: var(--llg-r-md); pointer-events: none; }
+#picker[data-open="1"] { display: flex; }
+.picker-row { max-width: 100%; font-family: var(--llg-font); font-size: 15px;
+  line-height: 1.5; color: var(--llg-text-3); text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.picker-row-on { color: var(--llg-text-1); font-weight: 600; }
+#picker-time { margin-top: 2px; font-family: var(--llg-font); font-size: 12px;
+  color: var(--llg-accent); font-variant-numeric: tabular-nums; }
 #stage:not(:has(#line-primary:not(:empty)))::before {
   content: "— 等待 Linglass 字幕 —";
-  font-size: 15px; font-weight: 400; color: #7a7a80; letter-spacing: .04em; }
+  font-size: 15px; font-weight: 400; color: var(--llg-text-3); letter-spacing: .04em; }
 
 /* 播放控制栏：浮窗自己的按钮，直接操作宿主页面里的 video（同源）。
    字体栈是给控制栏用的 —— 字幕行不再继承它（那两行完全按官方外观走） */
 #bar { display: flex; align-items: center; justify-content: center; gap: 6px;
   min-width: 0; padding: 7px 8px 7px;
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+  font-family: var(--llg-font); }
 /* min-width 必须是 0：写死按钮宽度等于给窗口设下限（见本节顶部说明）。
    窄窗口下按钮一起收窄，文字用 nowrap 保证不折行。
-   高度 / 圆角统一 34px / 8px；不再画描边，靠底色分层（PLAN 035） */
+   高度 / 圆角统一 34px / --llg-r-sm；不画描边，靠玻璃分层（PLAN 035 / 047） */
 #bar button { flex: 0 1 auto; min-width: 0; height: 34px; padding: 0 8px;
-  border: 0; border-radius: 8px;
-  background: rgba(255,255,255,.08); color: #fff;
+  border: 0; border-radius: var(--llg-r-sm);
+  background: var(--llg-surface-1); color: var(--llg-text-1);
+  box-shadow: var(--llg-sheen);
   font: inherit; font-size: 13px; line-height: 1; white-space: nowrap; cursor: pointer;
-  transition: background .15s ease, transform .12s ease; }
-#bar button:hover { background: rgba(255,255,255,.16); }
-#bar button:active { background: rgba(255,255,255,.24); transform: scale(.96); }
+  transition: background var(--llg-dur-fast) var(--llg-ease-out),
+    transform var(--llg-dur-fast) var(--llg-ease-out); }
+#bar button:hover { background: var(--llg-surface-2); }
+#bar button:active { background: var(--llg-surface-3); transform: scale(.96); }
 #bar button[disabled] { opacity: .32; cursor: default; transform: none; }
-#bar button[disabled]:hover { background: rgba(255,255,255,.08); }
+#bar button[disabled]:hover { background: var(--llg-surface-1); }
 /* 主按钮：圆形白底 + 深色图标，一眼能认出来 */
 #pip-toggle { flex: 0 0 34px; width: 34px; height: 34px; padding: 0;
-  border-radius: 50%; background: #fff; color: #141518; font-size: 13px; }
+  border-radius: var(--llg-r-pill); background: #fff; color: #141518; font-size: 13px; }
 #pip-toggle:hover { background: #f2f3f5; }
 #pip-toggle:active { background: #e6e8ec; }
 #pip-toggle[disabled], #pip-toggle[disabled]:hover { background: rgba(255,255,255,.3); color: #141518; }
@@ -950,8 +1039,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
 
 /* 整片进度条（PLAN 037）：控制栏正上方。轨道 3px、hover 5px，点 / 拖都能跳 */
 #progress { position: relative; flex: 0 0 auto; height: 3px; margin: 0 12px 6px;
-  border-radius: 999px; background: rgba(255, 255, 255, .12);
-  cursor: pointer; touch-action: none; transition: height .16s ease; }
+  border-radius: var(--llg-r-pill); background: var(--llg-surface-2);
+  cursor: pointer; touch-action: none; transition: height var(--llg-dur-fast) var(--llg-ease-out); }
 /* 加一圈透明命中区：3px 太细，鼠标很难点中 */
 #progress::before { content: ""; position: absolute; left: 0; right: 0;
   top: -7px; bottom: -7px; }
@@ -982,8 +1071,24 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     const secondaryColor = spec.secondaryAlpha < 1
       ? colorWithAlpha(target.color, spec.secondaryAlpha)
       : target.color;
+    const glass = design ? design.glassOf(target.glass) : 'regular';
 
-    return [PIP_BASE_CSS, plateCss(spec, size.base), `
+    // 玻璃表面：系统 PiP 窗口不能真的透到桌面，所以用「半透明层 + 顶部内高光 +
+    // 一层斜向柔光」模拟折射；三者叠在一起才是「液态玻璃」而不是「深灰卡片」。
+    const glassSurface = `
+body { background: var(--llg-glass-${glass}); }
+#box::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: var(--llg-highlight); }
+#box::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+  box-shadow: var(--llg-sheen), inset 0 0 0 1px var(--llg-hairline-soft); }
+#stage, #bars { position: relative; z-index: 1; }`;
+
+    return [
+      design ? design.tokensCss(':root') : ':root { color-scheme: dark; }',
+      PIP_BASE_CSS,
+      glassSurface,
+      plateCss(spec, size.base),
+      `
 #plate { display: flex; flex-direction: column; align-items: center;
   box-sizing: border-box; max-width: 100%; min-width: 0; }
 #line-primary { font-family: ${fontStackOf(spec, target.primaryLang)};
@@ -1015,8 +1120,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
 #line-primary rt { font-size: .5em; font-weight: 400; letter-spacing: 0;
   opacity: .6; line-height: 1.15; }
 /* 分隔符：与 15-ja-break.js 视频内那套（那边是 ::after）同一份观感。
-   PLAN 035：再压淡一档，只当「停顿」用，不当竖线看 */
-.${SEP_CLASS} { margin: 0 .16em; opacity: .2; font-weight: 400; }
+   PLAN 047：两处使用完全相同的数值（.15em / .34），不再一处 .14/.42、一处 .16/.2 */
+.${SEP_CLASS} { margin: 0 .15em; opacity: .34; font-weight: 400; }
 `].join('\n');
   }
 
@@ -1118,10 +1223,13 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
       primaryLang: officialSettings.learningLanguage,
       secondaryLang: officialSettings.nativeLanguage,
     };
+    // 浮窗的字号 / 颜色优先用「这一处自己的值」，没有才跟随官方（PLAN 047）。
+    // 这样视频内字幕与浮窗可以分别调，而旧用户（own 里没有这两项）观感不变。
     appearance = {
       style: officialSettings.subtitleStyle,
-      scale: officialSettings.subtitleScale,
-      color: officialSettings.subtitleColor,
+      scale: own.pip.scale ?? officialSettings.subtitleScale,
+      color: own.pip.color ?? officialSettings.subtitleColor,
+      glass: glassChoiceOf(own.pip.glass, 'regular'),
       dual: officialSettings.dualSubtitles,
       ctxLines: clampCtxLines(own.ctxLines),
       primaryLang: langs.primaryLang,
@@ -1198,32 +1306,62 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
   let lastKey = '';
   /** 上一次写进进度条的百分比（先比对再写，见 pushProgress） */
   let lastFill = '';
-  /** 上一次渲染的是第几句（-1 = 还没有）：只有它变了才播滚轮动效（见 pushText） */
+  /**
+   * 上一次渲染的那句在时间轴里的位置（-1 = 还没有）。
+   *
+   * 只用来判滚动方向（见 pushText）：它**不能**用来判「换句了没有」——
+   * 没有骨架时同一句的分步上屏会被采样成新句，index 会在一句之内连跳（PLAN 051）。
+   */
   let lastCueIndex = -1;
+  /** 上一次真正显示在浮窗里的原文；null = 还没有（首帧不滚） */
+  let lastShownPrimary = null;
   /** 整片进度的上一次百分比（与 lastFill 同理：先比对再写） */
   let lastTimeline = null;
   /** 在进度条上按住拖动时，document 上的 pointermove 也继续生效 */
   let timelineDragging = false;
+  /** 选句浮层是否开着（PLAN 049） */
+  let pickOpen = false;
+  /** 浮层里选中的句序号，以及这次滑动的基准句 */
+  let pickIndex = 0;
+  let pickBase = 0;
+  /** 这次滑动的累计位移（像素，已归一到像素单位） */
+  let pickTravel = 0;
+  /** 停手之后的跳转计时器 */
+  let pickTimer = 0;
+  /** 上一次跳到哪一句、什么时候跳的（见 PICK_ANCHOR_MS） */
+  let pickAnchor = -1;
+  let pickAnchorAt = 0;
   /** PiP 里那张 <style>（窗口重建时换引用，关窗时清掉） */
   let styleEl = null;
-  /** 当前生效的外观（官方设置投影 + 浮窗自己的 ctxLines，见 applyOfficial） */
+  /** 当前生效的外观（官方设置投影 + 本位置的覆盖值，见 applyOfficial） */
   let appearance = {
     style: OFFICIAL_DEFAULTS.subtitleStyle,
     scale: OFFICIAL_DEFAULTS.subtitleScale,
     color: OFFICIAL_DEFAULTS.subtitleColor,
+    glass: 'regular',
     dual: OFFICIAL_DEFAULTS.dualSubtitles,
     ctxLines: CTX_DEFAULT,
     primaryLang: null,
     secondaryLang: null,
   };
-  /** 浮窗自己持有的设置：只剩上下文行数（外观以官方设置为唯一真相） */
-  let own = { ctxLines: CTX_DEFAULT };
+  /**
+   * 我们自己的设置（按显示位置分组，见文件顶部 APPEARANCE_KEY 的注释）。
+   * `pip.scale` / `pip.color` 为 null = 跟随官方。
+   */
+  let own = {
+    ctxLines: CTX_DEFAULT,
+    pip: { glass: 'regular', scale: null, color: null },
+    panel: { glass: 'regular', scale: 100 },
+    page: { sep: 'bar' },
+  };
   /** 跟随官方的语言（学习语言 / 母语） */
   let langs = { primaryLang: null, secondaryLang: null };
   /** 最近一次应用到的官方设置（完整：面板回显都从这里读） */
   let officialSettings = { ...OFFICIAL_DEFAULTS, viewing: normalizeViewing() };
   /** 面板当前显示的是哪一页：'play' = 字幕，'root' / 'appearance' / 'modes' = 设置页 */
   let barMode = 'play';
+  /** 外观页当前在调哪一处（只在面板里活着，不落盘） */
+  let appearanceTarget = 'page';
   /** 语言下拉当前展开的是哪一个（同一次只开一个）；null = 都收起 */
   let openMenu = null;
   /**
@@ -1296,10 +1434,29 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
 
   // ---------------------------------------------------------------- 文案渲染
 
+  /**
+   * 这一屏要显示的原文：优先用**轨道里的整句**，而不是官方当前这一截半句（PLAN 053）。
+   *
+   * 官方同一句分步上屏时，画面上的文本只是整句的前缀。轨道（骨架 / 合并后的采样句）
+   * 才有完整的一句，所以前缀关系成立就用整句 —— 这会让这一句比语音略早显示完。
+   * 反过来不成立时（刚换句、轨道还停在上一句）一律以画面为准，避免把上一句顶上屏。
+   * 空档期（画面没有原文）也以画面为准：不硬塞轨道句。
+   */
+  function wholePrimary(live, complete) {
+    const shown = live || '';
+    const sentence = complete || '';
+    if (!shown || !sentence) return shown;
+    return sentence.startsWith(shown) ? sentence : shown;
+  }
+
   function currentLines() {
     const lines = track.readLines();
     if (!lines) return { primary: '', secondary: '' };
-    return lines;
+    const current = typeof track.getCurrent === 'function' ? track.getCurrent() : null;
+    return {
+      primary: wholePrimary(lines.primary, current && current.primary),
+      secondary: lines.secondary,
+    };
   }
 
   /**
@@ -1565,12 +1722,26 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     pushContext('prev', ctx >= 2, prev);
     pushContext('next', ctx >= 1, next);
 
-    // 滚轮动效只跟着「当前句换了一句」走：改颜色 / 改字号 / 开关断句都不该滚。
-    // 首次填充（上一次是 -1）也不滚 —— 开窗那一瞬间不该自己动一下。
+    // 滚轮动效只跟着「屏幕上这句原文真的换了」走。
+    //
+    // ⚠️ 判据**不能**用时间轴 index（PLAN 051）：没有骨架（官方还没写整条轨缓存）时，
+    // 同一句的分步上屏（原文先到 → 文本补全 → 译文后到）每一步都会被采样成一条 start
+    // 几乎相同的新 cue，index 于是一句之内连跳两三格 —— 动画就重放两三次，
+    // 用户看到的是「整块字幕跳三次才切到下一句」。
+    //
+    // 这里改用 lines.primary：译文后到、注音后到、上下文行变化、改设置都不是换句；
+    // 新文本以旧文本开头（「あ」→「あい」）是同一句在补全，也不算换句。
+    // index 只保留下来判方向（前进往上推、后退往下推）。
     const index = track.getCurrent() ? track.getCurrent().index : -1;
-    if (lastCueIndex >= 0 && index >= 0 && index !== lastCueIndex) {
-      roll(index > lastCueIndex ? 'up' : 'down');
+    const shown = lines.primary;
+    const switched = !!shown
+      && lastShownPrimary !== null
+      && shown !== lastShownPrimary
+      && !shown.startsWith(lastShownPrimary);
+    if (switched) {
+      roll(index >= lastCueIndex ? 'up' : 'down');
     }
+    if (shown) lastShownPrimary = shown;
     lastCueIndex = index;
   }
 
@@ -1688,6 +1859,132 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     el.currentTime = cues[index].start;
   }
 
+  // ---------------------------------------------------------------- 上下滑动选句（PLAN 049）
+  //
+  // 手机字幕屏（PLAN 045）的做法：手指上下滑 → 浮层显示选中句 → 松手 300ms 后
+  // 把播放位置跳到那一句。桌面端没有「松手」，对应的输入是滚轮 / 触控板滚动：
+  // 停手 300ms 就算松手。语义保持一致（上滑 = 往更早的句子翻）。
+
+  /** 选句用的时间文案（m:ss） */
+  function pickClock(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+  }
+
+  function pickerCues() {
+    return track.getCues() || [];
+  }
+
+  /**
+   * 这次滑动从哪一句起算。
+   * 优先用「刚跳到的锚点句」：跳转之后轨道里的当前句要等下一次采样（最多 1s）才更新，
+   * 这期间再滚一次如果从旧句起算，选中项会突然弹回去。
+   */
+  function pickOriginIndex(cues) {
+    if (pickAnchor >= 0 && Date.now() - pickAnchorAt < PICK_ANCHOR_MS && pickAnchor < cues.length) {
+      return pickAnchor;
+    }
+    const current = track.getCurrent();
+    if (current && current.index != null && current.index < cues.length) return current.index;
+    return cues.length - 1;
+  }
+
+  /** 只画选中句前后各 2 行（与手机端同一排法） */
+  function renderPicker() {
+    if (!pipWin) return;
+    const d = pipWin.document;
+    const rows = d.getElementById('picker-rows');
+    if (!rows) return;
+
+    const cues = pickerCues();
+    const nodes = [];
+    for (let off = -PICK_ROWS_AROUND; off <= PICK_ROWS_AROUND; off += 1) {
+      const cue = cues[pickIndex + off];
+      const row = d.createElement('div');
+      row.className = off === 0 ? 'picker-row picker-row-on' : 'picker-row';
+      // 上下文行没有原文时留空，不用占位符 —— 与浮窗上下文行一致
+      row.textContent = cue ? cue.primary || '' : '';
+      nodes.push(row);
+    }
+    rows.replaceChildren(...nodes);
+
+    const time = d.getElementById('picker-time');
+    const current = cues[pickIndex];
+    if (time) time.textContent = current ? pickClock(current.start) : '';
+  }
+
+  /**
+   * 打开（或保持）选句浮层。返回 false = 现在没有可挑的东西（轨道不足两句）。
+   * 浮层是覆在字幕区上的，不参与 #reel 的滚轮动效。
+   */
+  function openPicker() {
+    const cues = pickerCues();
+    if (cues.length < 2 || !video()) return false;
+    if (pickOpen) return true;
+
+    pickBase = Math.max(0, Math.min(cues.length - 1, pickOriginIndex(cues)));
+    pickIndex = pickBase;
+    pickTravel = 0;
+    pickOpen = true;
+
+    const el = pipWin && pipWin.document.getElementById('picker');
+    if (el) {
+      el.setAttribute('aria-hidden', 'false');
+      el.dataset.open = '1';
+    }
+    renderPicker();
+    return true;
+  }
+
+  function closePicker() {
+    pickOpen = false;
+    if (pickTimer) {
+      clearTimeout(pickTimer);
+      pickTimer = 0;
+    }
+    const el = pipWin && pipWin.document.getElementById('picker');
+    if (!el) return;
+    el.setAttribute('aria-hidden', 'true');
+    el.dataset.open = '0';
+  }
+
+  /** 停手之后才真的跳：把播放位置设到选中句开头（保持当前播放 / 暂停状态） */
+  function commitPick() {
+    pickTimer = 0;
+    if (!pickOpen) return;
+    const cue = pickerCues()[pickIndex];
+    const index = pickIndex;
+    closePicker();
+    const el = video();
+    if (!cue || !el) return;
+    el.currentTime = cue.start;
+    pickAnchor = index;
+    pickAnchorAt = Date.now();
+  }
+
+  /**
+   * 滚轮累计位移 → 选中句。
+   * `deltaMode`：0 = 像素，1 = 行，2 = 页（Firefox 的滚轮常是行单位）。
+   */
+  function rollPicker(ev) {
+    if (!openPicker()) return;
+    if (typeof ev.preventDefault === 'function') ev.preventDefault();
+
+    const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 100 : 1;
+    pickTravel += (Number(ev.deltaY) || 0) * unit;
+
+    const cues = pickerCues();
+    const offset = Math.round(pickTravel / PICK_ROW_PX);
+    const next = Math.max(0, Math.min(cues.length - 1, pickBase + offset));
+    if (next !== pickIndex) {
+      pickIndex = next;
+      renderPicker();
+    }
+
+    if (pickTimer) clearTimeout(pickTimer);
+    pickTimer = setTimeout(commitPick, PICK_COMMIT_MS);
+  }
+
   /** 当前生效的观看模式（每次都从官方设置里夹一遍，脏值不会漏进 UI） */
   function currentViewing() {
     return normalizeViewing(officialSettings.viewing);
@@ -1697,6 +1994,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
   function openPanel(page) {
     barMode = page || 'root';
     openMenu = null;
+    // 每次进外观页都从「视频内」开始：三个位置的分段是临时视图，不是持久选择
+    if (barMode === 'appearance') appearanceTarget = 'page';
     setPanelMode();
     syncPanel();
     pushTimeline();
@@ -1786,11 +2085,54 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
         // 0 → 1 → 2 → 0：只看当前句 / 加下一句 / 上下都给（浮窗自己的设置）
         setOwn({ ctxLines: (clampCtxLines(own.ctxLines) + 1) % (CTX_MAX + 1) });
         return true;
+      case 'sep': {
+        const index = SEP_CHOICES.indexOf(own.page.sep);
+        setOwn({ page: { ...own.page, sep: SEP_CHOICES[(index + 1) % SEP_CHOICES.length] } });
+        return true;
+      }
       case 'reading':
         toggleReading();
         return true;
       default:
         break;
+    }
+
+    // 外观页位置分段（PLAN 047）：只切界面，不落盘
+    if (act.startsWith('target:')) {
+      const target = act.slice('target:'.length);
+      if (!APPEARANCE_TARGETS.some((item) => item.id === target)) return false;
+      appearanceTarget = target;
+      syncPanel();
+      return true;
+    }
+
+    // 某一处自己的字号：scale+:pip / scale-:panel
+    const scaleTarget = act.startsWith('scale+:') ? act.slice('scale+:'.length)
+      : act.startsWith('scale-:') ? act.slice('scale-:'.length)
+        : null;
+    if (scaleTarget) {
+      const step = act.startsWith('scale+:') ? 1 : -1;
+      if (scaleTarget === 'pip') {
+        const base = own.pip.scale ?? officialSettings.subtitleScale;
+        setOwn({ pip: { ...own.pip, scale: stepScale(base, step) } });
+        return true;
+      }
+      if (scaleTarget === 'panel') {
+        setOwn({ panel: { ...own.panel, scale: stepScale(own.panel.scale, step) } });
+        return true;
+      }
+      return false;
+    }
+
+    // 玻璃质感：glass:pip / glass:panel（点击循环 清透 → 磨砂 → 深邃）
+    if (act.startsWith('glass:')) {
+      const target = act.slice('glass:'.length);
+      if (!['pip', 'panel'].includes(target)) return false;
+      const current = target === 'pip' ? own.pip.glass : own.panel.glass;
+      const index = GLASS_CHOICES.indexOf(glassChoiceOf(current, 'regular'));
+      const next = GLASS_CHOICES[(index + 1) % GLASS_CHOICES.length];
+      setOwn({ [target]: { ...own[target], glass: next } });
+      return true;
     }
 
     if (act.startsWith('page:')) {
@@ -2034,8 +2376,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
 .settings-panel { width: 100%; max-width: none; height: 100%; opacity: 1; visibility: visible;
   transform: none; overflow: visible; border: none; border-radius: 0; box-shadow: none;
   display: flex; flex-direction: column;
-  /* 与浮窗同一个底色：面板不再是浮在暗窗口里的白卡片 */
-  background: #141518; }
+  /* 与浮窗同一层玻璃：面板不再是浮在暗窗口里的白卡片（PLAN 047） */
+  background: transparent; }
 /* ---- 图标尺寸（PLAN 041）----
    svgIcon() 只写 viewBox，不写 width/height 属性，尺寸只能由 CSS 给。官方的尺寸规则写在
    拷来的那份 CSS 里，而那份 CSS 只在「用户先打开过官方面板」时才拷得到 —— 取不到就走兜底，
@@ -2064,6 +2406,17 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
 .lang-dropdown.open .lang-menu { display: block; }
 /* 我们的分组标题：直接用官方的 .section-label（50-settings-panel.js 注入时也用它） */
 .section-label { margin-top: 14px; }
+/* 外观页的三个调整位置（PLAN 047）：与面板里其他分段控件同一套玻璃胶囊 */
+.appearance-targets { display: flex; gap: 2px; margin: 2px 0 12px; padding: 2px;
+  border-radius: var(--llg-r-sm); background: var(--llg-surface-1); }
+.appearance-targets .segmented-option { flex: 1 1 0; min-width: 0; padding: 6px 4px;
+  border: 0; border-radius: var(--llg-r-xs); background: transparent;
+  color: var(--llg-text-2); font: inherit; font-size: 12px; cursor: pointer;
+  transition: background var(--llg-dur-fast) var(--llg-ease-out),
+    color var(--llg-dur-fast) var(--llg-ease-out); }
+.appearance-targets .segmented-option.active { background: var(--llg-surface-3);
+  color: var(--llg-text-1); }
+.appearance-group { display: block; }
 /* 官方面板里这两处把 #FFFFFF 当「面」用（暗色分支分别是 #2C2C2E / #48484A），
    转暗之后会变成白底白字，这里直接钉成暗色值 */
 .lang-menu { background: #2C2C2E; }
@@ -2119,12 +2472,14 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
   opacity: .7; }
 .appearance-controls { display: flex; align-items: center;
   justify-content: space-between; gap: 10px; }
-.font-controls { display: flex; align-items: center; border-radius: 8px;
-  background: rgba(255,255,255,.08); }
+.font-controls { display: flex; align-items: center; border-radius: var(--llg-r-sm);
+  background: var(--llg-surface-1); }
 .font-btn { width: 32px; height: 28px; border: none; background: none;
   color: inherit; cursor: pointer; display: flex; align-items: center;
   justify-content: center; }
-.font-divider { width: 1px; height: 16px; background: rgba(255,255,255,.2); }
+/* 字号数值：让「调字号」这件事一眼可见，而不是两个摸不着头脑的图标 */
+.font-value { min-width: 42px; text-align: center; font-size: 12px;
+  font-variant-numeric: tabular-nums; color: var(--llg-text-2); }
 .colors { display: flex; gap: 6px; }
 .color-btn { width: 22px; height: 22px; border-radius: 50%;
   border: 2px solid transparent; cursor: pointer; }
@@ -2168,7 +2523,11 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     show(d.getElementById('bar'), !open);
     show(d.getElementById('progress'), !open);
     show(d.getElementById('settings'), open);
-    if (open) syncPanel();
+    if (open) {
+      // 设置页要自己滚，选句浮层不能挂着（PLAN 049）
+      closePicker();
+      syncPanel();
+    }
   }
 
   function makeEl(d, tag, className, text) {
@@ -2312,6 +2671,33 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     return { grid, tiles };
   }
 
+  /**
+   * 字号 A−/A+。
+   * @param {string} [suffix] 目标位置（page 省略 / pip / panel）——写进 data-act，
+   *   于是同一套控件能分别驱动三个位置的字号（PLAN 047）。
+   */
+  function buildFontControls(d, suffix) {
+    const wrap = makeEl(d, 'div', 'font-controls');
+    const minus = makeEl(d, 'button', 'font-btn');
+    minus.type = 'button';
+    minus.dataset.act = suffix ? `scale-:${suffix}` : 'scale-';
+    minus.setAttribute('aria-label', '字号调小');
+    const minusIcon = svgIcon(d, null,
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="12" x2="18" y2="12"/></svg>');
+    if (minusIcon) minus.append(minusIcon);
+    // 数值必须露出来：否则用户只看到两个图标，会以为「字号调整没了」
+    const value = makeEl(d, 'span', 'font-value', '100%');
+    const plus = makeEl(d, 'button', 'font-btn');
+    plus.type = 'button';
+    plus.dataset.act = suffix ? `scale+:${suffix}` : 'scale+';
+    plus.setAttribute('aria-label', '字号调大');
+    const plusIcon = svgIcon(d, null,
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="6" x2="12" y2="18"/><line x1="6" y1="12" x2="18" y2="12"/></svg>');
+    if (plusIcon) plus.append(plusIcon);
+    wrap.append(minus, value, plus);
+    return { wrap, value };
+  }
+
   function buildColorPalette(d) {
     const colors = makeEl(d, 'div', 'colors');
     const buttons = new Map();
@@ -2386,6 +2772,13 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
       backTitle: null,
       title: null,
       ctxValue: null,
+      // PLAN 047：外观页的位置分段
+      targets: new Map(),
+      groups: new Map(),
+      glassValues: new Map(),
+      // 每个位置的字号数值（page 用官方档位，pip / panel 用自己那一格）
+      fontValues: new Map(),
+      sepValue: null,
     };
 
     const page = (name) => {
@@ -2503,51 +2896,110 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     }
 
     // ---------------------------------------------------------------- 外观页
+    //
+    // PLAN 047：先选「调整哪一处」，再显示那一处专属的控件。三处的存储互不牵连：
+    //   视频内  —— 官方设置（样式 / 字号 / 颜色）+ 我们的句内分隔符
+    //   桌面浮窗 —— 玻璃质感 / 字号 / 上下文行数（字号与颜色缺省仍跟随官方）
+    //   学习面板 —— 玻璃质感 / 字号
     const appearancePage = page('appearance');
+
+    const targetBar = makeEl(d, 'div', 'segmented appearance-targets');
+    targetBar.setAttribute('role', 'tablist');
+    nodes.targets = new Map();
+    for (const item of APPEARANCE_TARGETS) {
+      const btn = makeEl(d, 'button', 'segmented-option', item.label);
+      btn.type = 'button';
+      btn.dataset.act = `target:${item.id}`;
+      btn.dataset.target = item.id;
+      btn.setAttribute('role', 'tab');
+      targetBar.append(btn);
+      nodes.targets.set(item.id, btn);
+    }
+    appearancePage.append(targetBar);
+
+    nodes.groups = new Map();
+    const group = (id) => {
+      const el = makeEl(d, 'div', 'appearance-group');
+      el.id = `llg-appearance-${id}`;
+      el.dataset.group = id;
+      appearancePage.append(el);
+      nodes.groups.set(id, el);
+      return el;
+    };
+
+    // ── 视频内字幕：官方那套文字外观 + 我们的分隔符 ──
+    const pageGroup = group('page');
+
+    // 字号放在第一行：它是进入这一页最常用的调整项，压在样式瓷砖下面容易被当成「没了」
+    const controls = makeEl(d, 'div', 'appearance-controls');
+    const palette = buildColorPalette(d);
+    for (const [hex, btn] of palette.buttons) nodes.colors.set(hex, btn);
+    const pageFont = buildFontControls(d);
+    nodes.fontValues.set('page', pageFont.value);
+    controls.append(pageFont.wrap, palette.colors);
+    pageGroup.append(controls);
 
     const styleRow = makeEl(d, 'div', 'style-row');
     const head = makeEl(d, 'div', 'style-row__head');
     const headIcon = svgIcon(d, 'toggle-icon',
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2.5"/></svg>');
     if (headIcon) head.append(headIcon);
-    head.append(makeEl(d, 'span', null, '样式'));
+    head.append(makeEl(d, 'span', null, '文字样式'));
     const styleGrid = buildStyleGrid(d);
     for (const [name, btn] of styleGrid.tiles) nodes.presets.set(name, btn);
     nodes.styleCap = makeEl(d, 'p', 'style-cap');
     styleRow.append(head, styleGrid.grid, nodes.styleCap);
-    appearancePage.append(styleRow);
+    pageGroup.append(styleRow);
 
-    const controls = makeEl(d, 'div', 'appearance-controls');
-    const fontControls = makeEl(d, 'div', 'font-controls');
-    const minus = makeEl(d, 'button', 'font-btn');
-    minus.type = 'button';
-    minus.dataset.act = 'scale-';
-    minus.setAttribute('aria-label', '字号调小');
-    const minusIcon = svgIcon(d, null,
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="12" x2="18" y2="12"/></svg>');
-    if (minusIcon) minus.append(minusIcon);
-    const plus = makeEl(d, 'button', 'font-btn');
-    plus.type = 'button';
-    plus.dataset.act = 'scale+';
-    plus.setAttribute('aria-label', '字号调大');
-    const plusIcon = svgIcon(d, null,
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="6" x2="12" y2="18"/><line x1="6" y1="12" x2="18" y2="12"/></svg>');
-    if (plusIcon) plus.append(plusIcon);
-    fontControls.append(minus, makeEl(d, 'div', 'font-divider'), plus);
+    const sepRow = buildNavRow(d, {
+      act: 'sep',
+      title: '句内分隔符',
+      icon: ICON_CONTEXT,
+    });
+    nodes.sepValue = sepRow.value;
+    pageGroup.append(sepRow.row);
 
-    const palette = buildColorPalette(d);
-    for (const [hex, btn] of palette.buttons) nodes.colors.set(hex, btn);
-    controls.append(fontControls, palette.colors);
-    appearancePage.append(controls);
+    // ── 桌面浮窗：玻璃质感 / 字号 / 上下文行数 ──
+    const pipGroup = group('pip');
 
-    // 上下文行数：浮窗自己的维度，用原生 nav-row 呈现（点击循环 0 / 1 / 2）
+    const pipGlass = buildNavRow(d, {
+      act: 'glass:pip',
+      title: '玻璃质感',
+      icon: ICON_APPEARANCE,
+    });
+    nodes.glassValues = new Map([['pip', pipGlass.value]]);
+    pipGroup.append(pipGlass.row);
+
+    const pipControls = makeEl(d, 'div', 'appearance-controls');
+    const pipFont = buildFontControls(d, 'pip');
+    nodes.fontValues.set('pip', pipFont.value);
+    pipControls.append(pipFont.wrap);
+    pipGroup.append(pipControls);
+
     const ctxRow = buildNavRow(d, {
       act: 'ctx',
       title: '上下文行数',
       icon: ICON_CONTEXT,
     });
     nodes.ctxValue = ctxRow.value;
-    appearancePage.append(ctxRow.row);
+    pipGroup.append(ctxRow.row);
+
+    // ── 学习面板：玻璃质感 / 字号 ──
+    const panelGroup = group('panel');
+
+    const panelGlass = buildNavRow(d, {
+      act: 'glass:panel',
+      title: '玻璃质感',
+      icon: ICON_APPEARANCE,
+    });
+    nodes.glassValues.set('panel', panelGlass.value);
+    panelGroup.append(panelGlass.row);
+
+    const panelControls = makeEl(d, 'div', 'appearance-controls');
+    const panelFont = buildFontControls(d, 'panel');
+    nodes.fontValues.set('panel', panelFont.value);
+    panelControls.append(panelFont.wrap);
+    panelGroup.append(panelControls);
 
     // ---------------------------------------------------------------- 观看模式页
     const modes = page('modes');
@@ -2796,6 +3248,26 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
       toggleClass(btn, 'selected', selected);
     }
     setText(nodes.ctxValue, `${clampCtxLines(own.ctxLines)} / ${CTX_MAX}`);
+
+    // 外观页的位置分段（PLAN 047）：只显示当前这一处的控件
+    for (const [id, btn] of nodes.targets || []) {
+      toggleClass(btn, 'active', id === appearanceTarget);
+    }
+    for (const [id, el] of nodes.groups || []) {
+      show(el, id === appearanceTarget);
+    }
+    if (nodes.glassValues) {
+      setText(nodes.glassValues.get('pip'),
+        GLASS_LABELS[glassChoiceOf(own.pip.glass, 'regular')]);
+      setText(nodes.glassValues.get('panel'),
+        GLASS_LABELS[glassChoiceOf(own.panel.glass, 'regular')]);
+    }
+    if (nodes.sepValue) setText(nodes.sepValue, SEP_LABELS[own.page.sep] || own.page.sep);
+    if (nodes.fontValues) {
+      setText(nodes.fontValues.get('page'), `${s.subtitleScale}%`);
+      setText(nodes.fontValues.get('pip'), `${own.pip.scale ?? s.subtitleScale}%`);
+      setText(nodes.fontValues.get('panel'), `${own.panel.scale}%`);
+    }
 
     // 观看模式
     for (const [mode, btn] of nodes.modeTiles) {
@@ -3053,10 +3525,18 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     styleEl = null; // 那两张 <style> 随窗口一起没了
     panelNodes = null;
     timelineDragging = false;
+    // 选句浮层与挂起的跳转随窗口一起作废（PLAN 049）
+    pickOpen = false;
+    if (pickTimer) {
+      clearTimeout(pickTimer);
+      pickTimer = 0;
+    }
+    pickAnchor = -1;
     lastTimeline = null; // 设置面板的回显引用同理
     barMode = 'play';  // 新窗口从播放控制栏开始，不继承上一扇窗的样式条状态
     lastKey = '';
     lastCueIndex = -1; // 新窗口的第一次填充不播滚轮动效
+    lastShownPrimary = null; // 同上：没有「上一句」可比，首帧不滚（PLAN 051）
     lastFill = '';  // 新窗口的填充条是从 0 开始的，别被上一扇窗的值挡住第一次写
     refreshButton();
   }
@@ -3137,6 +3617,19 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
     reel.append(prev, plate, next);
 
     stage.append(reel);
+
+    // 上下滑动选句的浮层（PLAN 049）：绝对定位覆在 #stage 上，默认收起。
+    // 结构先建好、内容滚动时再重画 —— 不参与 #stage 的 flex 布局，窗口高度不变。
+    const picker = d.createElement('div');
+    picker.id = 'picker';
+    picker.setAttribute('aria-hidden', 'true');
+    picker.dataset.open = '0';
+    const pickerRows = d.createElement('div');
+    pickerRows.id = 'picker-rows';
+    const pickerTime = d.createElement('div');
+    pickerTime.id = 'picker-time';
+    picker.append(pickerRows, pickerTime);
+    stage.append(picker);
 
     const bar = d.createElement('div');
     bar.id = 'bar';
@@ -3244,6 +3737,17 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #141518;
       ev.preventDefault();
       command(btn.dataset.act);
     });
+
+    // 上下滑动选句（PLAN 049）：滚轮 / 触控板在字幕区上滚 = 手机上的上下滑动。
+    // 设置页里不接管 —— 那一页自己要能滚。
+    d.addEventListener('wheel', (ev) => {
+      if (barMode !== 'play') return;
+      rollPicker(ev);
+    }, { passive: false });
+
+    // 复制浮窗里的句子时剥掉振假名与分隔符（PLAN 050）。浮窗是独立的文档，
+    // 页面上装的那一份管不到这里。
+    if (typeof shared.installCopySanitizer === 'function') shared.installCopySanitizer(d);
 
     win.addEventListener('pagehide', () => handlePageHide(win));
   }

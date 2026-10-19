@@ -197,3 +197,18 @@ test('指纹：sameFingerprint 判同', async () => {
   assert.equal(srt.sameFingerprint(a, null), false);
   assert.equal(srt.sameFingerprint(null, null), false);
 });
+test('整条轨导入：parseSrtBlocks 保留行边界，parseSrt 结构不变', async () => {
+  const srt = await loadSrt();
+  const text = [
+    '1', '00:00:01,000 --> 00:00:02,000', 'こんにちは', '你好', '',
+    '2', '00:00:03,000 --> 00:00:04,000', 'さようなら', '',
+  ].join('\n');
+
+  const blocks = srt.parseSrtBlocks(text);
+  assert.deepEqual(plain(blocks.map((b) => b.lines)), [['こんにちは', '你好'], ['さようなら']]);
+  assert.equal(blocks[0].text, 'こんにちは 你好');
+
+  const parsed = srt.parseSrt(text);
+  assert.equal('lines' in parsed[0], false, 'parseSrt 的字段不变，既有断言靠它');
+  assert.deepEqual(plain(parsed[0]), { start: 1, end: 2, text: 'こんにちは 你好' });
+});

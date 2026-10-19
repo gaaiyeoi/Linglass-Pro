@@ -208,7 +208,16 @@
         primaryLang: official.learningLanguage || null,
         secondaryLang: official.nativeLanguage || null,
         ctxLines: Number.isFinite(own.ctxLines) ? own.ctxLines : 1,
-        separator: (jaBreak && jaBreak.SEPARATOR) || '|',
+        // 分隔符跟着视频内那一处走（PLAN 047）：none 时传空串，手机端不画符号
+        separator: (() => {
+          if (!jaBreak) return '|';
+          if (typeof jaBreak.separator === 'function') {
+            const mode = jaBreak.separator();
+            if (mode === 'none') return '';
+            return mode === 'dot' ? '·' : '|';
+          }
+          return jaBreak.SEPARATOR || '|';
+        })(),
       },
     };
   }

@@ -44,28 +44,41 @@
   const MARK_CLASS = 'llg-jabreak';
   const STYLE_ID = 'llg-jabreak-style';
   const STORE_KEY = 'llgJaBreak';
+  /** 外观设置（30-desktop-subtitles.js 写的那个键）：这里只关心 page.sep */
+  const APPEARANCE_KEY = 'llgPipAppearance';
+  const SEP_CHOICES = ['bar', 'dot', 'none'];
 
   // 兜底心跳（官方换了这一行的 DOM 之后，MutationObserver 未必每次都叫得动）
   // 不再自己 setInterval —— 见文件末尾 shared.onTick(refresh)，与其余四个模块共用
   // 同一个 1s 定时器（PLAN 025）。
 
-  /** 分隔符。改这里就会同步进下面 CSS 的 ::after content */
+  /**
+   * 分隔符（PLAN 047 起可配三档）。
+   * 与 30-desktop-subtitles.js 的 `.llg-sep` 使用**完全相同**的 .15em / .34，
+   * 视频内与浮窗看起来才是同一个符号，而不是「一处 .14/.42、一处 .16/.2」。
+   */
   const SEPARATOR = '|';
+  const SEP_CONTENT = { bar: '"|"', dot: '"·"' };
+  let sep = 'bar';
 
   const TEXT_NODE = 3;
   const ELEMENT_NODE = 1;
 
-  const MARK_CSS = `
-.${MARK_CLASS} {
+  /** 当前分隔符档位对应的样式（none 时伪元素彻底不生成） */
+  function markCss() {
+    const head = `.${MARK_CLASS} {
   pointer-events: none;
 }
-.${MARK_CLASS}::after {
-  content: "${SEPARATOR}";
-  margin: 0 .14em;
-  opacity: .42;
+`;
+    if (sep === 'none') return `${head}.${MARK_CLASS}::after { content: none; }\n`;
+    return `${head}.${MARK_CLASS}::after {
+  content: ${SEP_CONTENT[sep] || SEP_CONTENT.bar};
+  margin: 0 .15em;
+  opacity: .34;
   font-weight: 400;
 }
 `;
+  }
 
   let enabled = true;
   let boundRoot = null;
@@ -159,10 +172,16 @@
   // ---------------------------------------------------------------- 注入
 
   function ensureStyle(root) {
-    if (root.querySelector('#' + STYLE_ID)) return;
+    const css = markCss();
+    const existing = root.querySelector('#' + STYLE_ID);
+    if (existing) {
+      // 分隔符档位变了要换内容；先比对再写，避免 MutationObserver 自己打自己
+      if (existing.textContent !== css) existing.textContent = css;
+      return;
+    }
     const style = document.createElement('style');
     style.id = STYLE_ID;
-    style.textContent = MARK_CSS;
+    style.textContent = css;
     root.prepend(style);
   }
 
@@ -258,9 +277,25 @@
     chrome.storage.local.set({ [STORE_KEY]: { enabled } }).catch(() => {});
   }
 
+  /** 换分隔符档位：只影响样式，不重算切点 */
+  function setSeparator(next) {
+    const value = SEP_CHOICES.includes(next) ? next : 'bar';
+    if (value === sep) return;
+    sep = value;
+    const root = subtitleRoot();
+    if (root) ensureStyle(root);
+  }
+
   // 纯函数的测试钩子（切分逻辑本体在 05-ja-segment.js）
   Object.defineProperty(globalThis, NS, {
-    value: { refresh, isEnabled: () => enabled, SEPARATOR },
+    value: {
+      refresh,
+      isEnabled: () => enabled,
+      SEPARATOR,
+      separator: () => sep,
+      setSeparator,
+      markup: markCss,
+    },
     configurable: true,
   });
 
@@ -290,6 +325,25 @@
     .catch(() => {
       refresh();
     });
+
+  // 分隔符档位由浮窗的「外观 → 视频内」写入同一个 APPEARANCE_KEY
+  chrome.storage.local
+    .get(APPEARANCE_KEY)
+    .then((res) => {
+      const saved = res && res[APPEARANCE_KEY];
+      if (saved && saved.page) setSeparator(saved.page.sep);
+    })
+    .catch(() => {});
+
+  try {
+    chrome.storage.onChanged?.addListener((changes, area) => {
+      if (area !== 'local' || !changes || !changes[APPEARANCE_KEY]) return;
+      const next = changes[APPEARANCE_KEY].newValue;
+      if (next && next.page) setSeparator(next.page.sep);
+    });
+  } catch {
+    // storage 不可用（被裁剪的包）：保持默认档位
+  }
 
   // 官方换视频 / 重建播放器时，行的 DOM 会被整个换掉，靠心跳兜底重新注入。
   // 定时器挂在 00-shared.js 的共享心跳上（PLAN 025）：一个页面只需要一个 1s 定时器

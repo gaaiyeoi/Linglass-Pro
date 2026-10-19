@@ -43,6 +43,129 @@
     if (el) el.remove();
   }
 
+  // ---------------------------------------------------------------- 设计令牌
+  //
+  // PLAN 047：全插件的视觉只有一套语言 —— **液态玻璃**。
+  //
+  // 之前每个渲染位置各写一份近似值（深色底有 #141518 / rgba(28,28,30,.92) /
+  // rgba(22,22,24,.97) 三种，模糊有 8 / 20 / 20+saturate 三种，圆角有 8 / 9 / 10 / 12），
+  // 放在一起看就是「不像同一个产品」。这里把玻璃的物理参数收敛成三档（清透 / 磨砂 /
+  // 深邃），其余语义令牌（文字、强调色、圆角、间距、动效）也统一到一个来源。
+  //
+  // 消费方：
+  //   · 30-desktop-subtitles.js 的浮窗 + 浮窗设置面板（tokensCss(':root')）
+  //   · 40-study-panel.js 的学习面板（值对齐，见那边的注释）
+  //   · tools/cast-page.mjs 的手机字幕屏（构建期拼同一份文本，但**不带模糊**）
+  //
+  // 为什么不直接引用官方 `--lg-*`：官方令牌定义在它自己的 shadow root 里，
+  // `:host { all: initial }` 又会把自定义属性重置成初始值 —— 引用永远走兜底值。
+
+  /** 玻璃三档：level 是给设置面板与存储用的稳定标识 */
+  const GLASS_LEVELS = ['thin', 'regular', 'thick'];
+
+  /** 每一档的物理参数（深色）。浅色覆盖见 tokensCss 的 media query */
+  const GLASS = {
+    thin: {
+      bg: 'rgba(24, 24, 27, .60)',
+      blur: 'blur(16px) saturate(160%)',
+      shadow: '0 8px 24px rgba(0, 0, 0, .32)',
+    },
+    regular: {
+      bg: 'rgba(19, 20, 24, .76)',
+      blur: 'blur(28px) saturate(190%)',
+      shadow: '0 12px 32px rgba(0, 0, 0, .42)',
+    },
+    thick: {
+      bg: 'rgba(13, 14, 17, .91)',
+      blur: 'blur(44px) saturate(220%)',
+      shadow: '0 16px 40px rgba(0, 0, 0, .5)',
+    },
+  };
+
+  /** 取一档玻璃的落盘值（脏值一律回落 regular） */
+  function glassOf(level) {
+    return GLASS_LEVELS.includes(level) ? level : 'regular';
+  }
+
+  /**
+   * 生成 `--llg-*` 令牌块。
+   * @param {string} selector 作用域（浏览器端用 ':root'，shadow 里用 ':host'）
+   */
+  function tokensCss(selector = ':root') {
+    const glassVars = GLASS_LEVELS.map((level) => [
+      `  --llg-glass-${level}: ${GLASS[level].bg};`,
+      `  --llg-blur-${level}: ${GLASS[level].blur};`,
+      `  --llg-shadow-${level}: ${GLASS[level].shadow};`,
+    ].join('\n')).join('\n');
+
+    return `${selector} {
+${glassVars}
+  --llg-sheen: inset 0 1px 0 rgba(255, 255, 255, .10);
+  --llg-highlight: linear-gradient(135deg, rgba(255, 255, 255, .10) 0%, rgba(255, 255, 255, .02) 100%);
+  --llg-hairline: rgba(255, 255, 255, .10);
+  --llg-hairline-soft: rgba(255, 255, 255, .06);
+  --llg-text-1: #F5F5F7;
+  --llg-text-2: #A1A1A6;
+  --llg-text-3: #7C7C82;
+  --llg-text-4: #5E5E64;
+  --llg-accent: #0A84FF;
+  --llg-accent-soft: rgba(10, 132, 255, .14);
+  --llg-accent-softer: rgba(10, 132, 255, .09);
+  --llg-surface-1: rgba(255, 255, 255, .06);
+  --llg-surface-2: rgba(255, 255, 255, .10);
+  --llg-surface-3: rgba(255, 255, 255, .16);
+  --llg-r-xs: 6px;
+  --llg-r-sm: 8px;
+  --llg-r-md: 12px;
+  --llg-r-lg: 16px;
+  --llg-r-pill: 999px;
+  --llg-space-1: 4px;
+  --llg-space-2: 8px;
+  --llg-space-3: 12px;
+  --llg-space-4: 16px;
+  --llg-dur-fast: .15s;
+  --llg-dur-base: .22s;
+  --llg-dur-slow: .32s;
+  --llg-ease: cubic-bezier(.22, .61, .36, 1);
+  --llg-ease-out: cubic-bezier(0, 0, .2, 1);
+  --llg-font: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, 'PingFang SC', sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  ${selector} {
+    --llg-glass-thin: rgba(255, 255, 255, .62);
+    --llg-glass-regular: rgba(250, 250, 252, .78);
+    --llg-glass-thick: rgba(255, 255, 255, .92);
+    --llg-sheen: inset 0 1px 0 rgba(255, 255, 255, .9);
+    --llg-highlight: linear-gradient(135deg, rgba(255, 255, 255, .9) 0%, rgba(255, 255, 255, .55) 100%);
+    --llg-hairline: rgba(0, 0, 0, .10);
+    --llg-hairline-soft: rgba(0, 0, 0, .06);
+    --llg-text-1: #1D1D1F;
+    --llg-text-2: #636366;
+    --llg-text-3: #7C7C82;
+    --llg-text-4: #48484A;
+    --llg-accent: #007AFF;
+    --llg-accent-soft: rgba(0, 122, 255, .12);
+    --llg-accent-softer: rgba(0, 122, 255, .08);
+    --llg-surface-1: rgba(0, 0, 0, .04);
+    --llg-surface-2: rgba(0, 0, 0, .07);
+    --llg-surface-3: rgba(0, 0, 0, .12);
+    --llg-shadow-thin: 0 8px 24px rgba(0, 0, 0, .12);
+    --llg-shadow-regular: 0 12px 32px rgba(0, 0, 0, .16);
+    --llg-shadow-thick: 0 16px 40px rgba(0, 0, 0, .2);
+  }
+}`;
+  }
+
+  /** 某一档玻璃的表面声明（背景 + 模糊 + 内高光） */
+  function glassCss(level) {
+    const name = glassOf(level);
+    return `background: var(--llg-glass-${name});
+  -webkit-backdrop-filter: var(--llg-blur-${name});
+  backdrop-filter: var(--llg-blur-${name});
+  box-shadow: var(--llg-shadow-${name}), var(--llg-sheen);`;
+  }
+
   const STYLE_ID = 'llg-mod-control-styles';
 
   const CONTROL_CSS = `
@@ -244,8 +367,105 @@
     return [...features.values()];
   }
 
+  // ---------------------------------------------------------------- 复制清道夫
+  //
+  // PLAN 050：官方的振假名是 `<ruby>夜<rt>よる</rt></ruby>`，浏览器对选区的默认复制
+  // 会把 `<rt>` 的文本按顺序拼进去 —— 从浮窗 / 页面字幕里抠一句话，粘出来就是
+  // 「夜よる」。剪贴板不经过我们自己的读取路径（`10-subtitle-track.js` 的 `plainText()`
+  // 早已剥掉 rt），所以只能在 `copy` 事件上把选区重新序列化一遍。
+  //
+  // 浮窗原文行里还有文节分隔符（`.llg-sep` 节点），同样不该被复制。
+  // 只有选区里**确实含**这两样东西时才接管，其余复制保持浏览器原生行为
+  // （换行与富文本粘贴都不动）。
+
+  /** 浮窗分隔符节点的 class（与 30-desktop-subtitles.js 的 SEP_CLASS 一致） */
+  const COPY_SEP_CLASS = 'llg-sep';
+
+  function isCopyNoise(node) {
+    if (!node) return false;
+    if (node.nodeName === 'RT') return true;
+    return !!(node.className && String(node.className).split(/\s+/).includes(COPY_SEP_CLASS));
+  }
+
+  function hasCopyNoise(node) {
+    if (!node) return false;
+    if (isCopyNoise(node)) return true;
+    for (const child of node.childNodes || []) {
+      if (hasCopyNoise(child)) return true;
+    }
+    return false;
+  }
+
+  /** 跳过 rt 与分隔符取文本（与 10- 的 subtreeText 同口径，但不建节点） */
+  function copyTextOf(node) {
+    let text = '';
+    for (const child of node.childNodes || []) {
+      if (child.nodeType === 3) {
+        text += child.data || '';
+        continue;
+      }
+      if (isCopyNoise(child)) continue;
+      text += copyTextOf(child);
+    }
+    return text;
+  }
+
+  /**
+   * 选区 → 干净纯文本。选区为空、或里面没有 rt / 分隔符时返回 null（= 不接管）。
+   */
+  function selectionCopyText(win) {
+    const sel = win && typeof win.getSelection === 'function' ? win.getSelection() : null;
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+
+    try {
+      const parts = [];
+      let noise = false;
+      for (let i = 0; i < sel.rangeCount; i += 1) {
+        const range = sel.getRangeAt(i);
+        const frag = range && typeof range.cloneContents === 'function' ? range.cloneContents() : null;
+        if (!frag) return null;
+        if (hasCopyNoise(frag)) noise = true;
+        parts.push(copyTextOf(frag));
+      }
+
+      if (!noise) return null;
+      // 分隔符两侧的窄空格（\u2009）也去掉，粘出来才是干净的句子
+      return parts.join('\n').replace(/\u2009/g, '').trim();
+    } catch {
+      // 选区跨了拿不到的范围（跨文档 / 已失效）：不接管，让浏览器按原样复制
+      return null;
+    }
+  }
+
+  /** 给一个 window / document 装上复制清道夫（同一个目标只装一次） */
+  function installCopySanitizer(win) {
+    if (!win || typeof win.addEventListener !== 'function') return;
+    if (win.__llgCopySanitized) return;
+    win.__llgCopySanitized = true;
+    win.addEventListener('copy', (ev) => {
+      const text = selectionCopyText(win);
+      if (text === null) return;
+      const data = ev && ev.clipboardData;
+      if (!data || typeof data.setData !== 'function') return;
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      data.setData('text/plain', text);
+    });
+  }
+
+  installCopySanitizer(document);
+
   Object.defineProperty(globalThis, NS, {
-    value: { ensureButton, setButtonState, injectStyle, registerFeature, listFeatures, onTick },
+    value: {
+      ensureButton,
+      setButtonState,
+      injectStyle,
+      registerFeature,
+      listFeatures,
+      onTick,
+      installCopySanitizer,
+      // 设计令牌（PLAN 047）：所有自有 UI 的表面材质 / 色彩 / 形状 / 动效都从这里取
+      design: { GLASS_LEVELS, GLASS, glassOf, tokensCss, glassCss },
+    },
     configurable: true,
   });
 })();

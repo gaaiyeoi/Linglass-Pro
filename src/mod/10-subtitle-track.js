@@ -69,6 +69,13 @@
   const MAX_CUE_SECONDS = 20;
   /** 重看同一段时判定「同一句」的时间容差 */
   const DEDUPE_WINDOW_SECONDS = 2.5;
+  /**
+   * 判定「同一句分步上屏」的相邻采样窗口（PLAN 053）。
+   *
+   * 官方同一句常常先给半句、再补全（「あの」→「あの、そうですね」）。两次采样通常只隔
+   * 零点几秒，用与去重同量级的窗口足够；放大到几秒会把真正相邻的两句也吞成一句。
+   */
+  const FRAGMENT_WINDOW_SECONDS = 2.5;
 
   /**
    * 单个视频最多保留多少句（PLAN 025）。
@@ -142,6 +149,13 @@
 
   let cues = [];
   let meta = null;
+  /**
+   * 整条轨道是不是用户用文件替换来的（PLAN 052）。
+   *
+   * 为真时**不许骨架再覆盖/补句**：用户已经按句重新断过，官方那套滚动断句只会把结果弄乱。
+   * 换视频时按落盘里的 `meta.import.wholeTrack` 还原，所以刷新后依然生效。
+   */
+  let manualTrack = false;
   /** 当前正在显示的那一句（不一定在数组末尾——用户会往回拖进度条） */
   let active = null;
   /**
@@ -156,6 +170,13 @@
   let videoRef = null;
   let lastKey = null;
   let lastTickTime = null;
+  /**
+   * 上一次 capture() 的时刻（PLAN 053）。
+   *
+   * 与 lastTickTime 分开：那个只在「正常播放前进」时才更新，暂停或刚跳转时会停住；
+   * 判断「同一句分步上屏」要的是「两次采样之间隔了多久」，暂停时补全文本也必须算同一句。
+   */
+  let lastCaptureTime = null;
   let saveTimer = 0;
   let loading = false;
 
@@ -186,6 +207,13 @@
     done: false,
     /** 正在读（防并发重入） */
     loading: false,
+    /**
+     * 读的过程中又收到「官方刚写好缓存」的事件。
+     *
+     * 不接住的话：事件被 loading 挡掉，而当前这次读完又可能把 done 置真，
+     * 于是刚写好的整条轨照样被永久放弃（PLAN 049）。
+     */
+    pending: false,
     /** 已采用的那份 key */
     adopted: null,
     /** 已经换过几次候选 */
@@ -489,6 +517,15 @@
     invalidateEstimate();
   }
 
+  /** 当前轨道里有多少句来自骨架（用来判断新骨架是不是更短） */
+  function adoptedCount() {
+    let count = 0;
+    for (const cue of cues) {
+      if (officialCues.has(cue)) count += 1;
+    }
+    return count;
+  }
+
   /** 丢掉上一份骨架带来的状态（换骨架、清空轨道时用） */
   function resetSkeletonAdoption() {
     officialCues = new WeakSet();
@@ -543,6 +580,8 @@
   async function maybeLoadSkeleton() {
     const videoId = meta && meta.id;
     if (!videoId || skeleton.loading || skeleton.done) return;
+    // 整条轨来自用户文件：官方骨架不许再插手（PLAN 052）
+    if (manualTrack) return;
 
     if (skeleton.videoId !== videoId) {
       skeleton.videoId = videoId;
@@ -552,6 +591,7 @@
       skeleton.done = false;
       skeleton.adopted = null;
       skeleton.switches = 0;
+      skeleton.pending = false;
     }
 
     skeleton.loading = true;
@@ -577,6 +617,9 @@
         const stored = await chrome.storage.local.get(key);
         const list = fromSkeleton(stored && stored[key] && stored[key].cues);
         if (!list.length) continue;
+        // 已采用的整条轨只许变长：官方可能重写缓存（cachedAt 更新）或留下更短的重切产物，
+        // 采用更短的会把「全文」缩回去（PLAN 049）。
+        if (skeleton.adopted && list.length < adoptedCount()) continue;
 
         if (skeleton.adopted) resetSkeletonAdoption();
         adoptSkeleton(list);
@@ -597,7 +640,51 @@
       warn(`读官方字幕缓存失败（退回只记录播放过的句子）：${err && err.message}`);
     } finally {
       skeleton.loading = false;
+      // 读的过程中官方又写了缓存：补一次，别让这一轮把 done 定死
+      if (skeleton.pending) {
+        skeleton.pending = false;
+        skeleton.done = false;
+        skeleton.keys = null;
+        skeleton.next = 0;
+        maybeLoadSkeleton().catch(() => {});
+      }
     }
+  }
+
+  /**
+   * 官方写完整条轨时会往 `chrome.storage.local` 写 `subtitle-cache:v6:…:primary`。
+   *
+   * 为什么必须事件驱动：这条缓存可能在我们开始播放**几分钟后**才写进来（本机实测
+   * 一条 21 分钟的视频，页面打开约 100 秒后才出现）。而旧实现只有 60 次心跳的轮询窗口，
+   * 窗口一过就永久放弃 —— 面板与导出于是一直只有「播放过的句子」（PLAN 049 的根因）。
+   *
+   * 只认当前视频的原文档位：其它视频的写入、`:yt-reseg` / `:zh` 那些槽位都不能触发重来。
+   */
+  function onStorageChanged(changes, areaName) {
+    if (areaName !== 'local') return;
+    if (manualTrack) return;
+    const videoId = meta && meta.id;
+    if (!videoId || !changes) return;
+
+    const prefix = `${SKELETON_PREFIX}${videoId}:`;
+    const arrived = Object.keys(changes).some((key) => {
+      const change = changes[key];
+      return key.startsWith(prefix)
+        && key.endsWith(SKELETON_SLOT)
+        && change
+        && change.newValue;
+    });
+    if (!arrived) return;
+
+    skeleton.done = false;
+    if (skeleton.loading) {
+      skeleton.pending = true;
+      return;
+    }
+    skeleton.keys = null;
+    skeleton.next = 0;
+    skeleton.tries = 0;
+    maybeLoadSkeleton().catch(() => {});
   }
 
   // ---------------------------------------------------------------- 轨道写入
@@ -710,6 +797,40 @@
   }
 
   /**
+   * 同一句的「分步上屏」：官方先给半句、再补全（PLAN 053）。
+   *
+   * 不合并的话，每一步都会被当成新句：浮窗只显示半句，句内进度的分母也跟着半句走
+   * （播到半句就回零）。判据刻意保守 —— 只在「新文本是旧文本的延长（或反过来）」
+   * 且相邻采样够近时合并。真正相邻的两句若恰好互为前缀（「はい」→「はい、そうです」）
+   * 会被吞成一句，这是已知取舍：宁可整句长一点，也不要把一句话拆成两截显示。
+   *
+   * 骨架句不参与：官方整条轨里的句子本身就是权威整句，不能被采样到的半句改写。
+   */
+  function absorbFragment(lines, t) {
+    if (!active) return false;
+    // 整轨被导入文件替换过（PLAN 052）→ 句子结构以文件为准，采样不许改写
+    if (manualTrack) return false;
+    if (officialCues.has(active)) return false;
+    if (t != null && lastCaptureTime != null && t - lastCaptureTime > FRAGMENT_WINDOW_SECONDS) {
+      return false;
+    }
+
+    const prev = normalizeText(active.primary);
+    const next = normalizeText(lines.primary);
+    if (!prev || !next) return false;
+
+    const grows = next.startsWith(prev);
+    const shrinks = prev.startsWith(next);
+    if (!grows && !shrinks) return false;
+
+    if (grows) active.primary = lines.primary;
+    // 导入的译文优先（PLAN 031），采样不许覆盖它
+    if (lines.secondary && active.origin !== 'imported') active.secondary = lines.secondary;
+    scheduleSave();
+    return true;
+  }
+
+  /**
    * 采样一次字幕状态。字幕空档期不建句，只收尾。
    * 每次「换了新的一句」都通知订阅者 —— 桌面字幕靠它做到零延迟跟读，
    * 不必等下一个心跳。
@@ -721,18 +842,28 @@
   function capture() {
     const lines = readLines();
     lastLines = lines;
+    const t = currentTime();
     const key = lines ? `${lines.primary}\u0000${lines.secondary}` : '';
 
     if (key === lastKey) {
       extendActive();
+      lastCaptureTime = t;
       return;
     }
     lastKey = key;
+
+    // 同一句在补全：并入当前句，不新建、不重放换句（PLAN 053）
+    if (lines && absorbFragment(lines, t)) {
+      lastCaptureTime = t;
+      notify();
+      return;
+    }
 
     closeActive();
     // 骨架的重试不挂在这里：逐词高亮会让 capture 一秒触发好几次，次数会被刷爆
     // （见 heartbeat 的调用点）
     if (lines && (lines.primary || lines.secondary)) openCue(lines);
+    lastCaptureTime = t;
     notify();
   }
 
@@ -870,6 +1001,7 @@
     meta = next;
     cues = [];
     active = null;
+    manualTrack = false;
     lastKey = null;
     lastTickTime = null;
     // 换视频了：上一部片的行不该再参与「画面与时间轴对得上吗」的判断
@@ -884,6 +1016,8 @@
       if (stored && Array.isArray(stored.cues) && stored.cues.length) {
         cues = stored.cues;
         meta = { ...next, ...stored.meta, ...next, title: next.title || stored.meta?.title || '' };
+        // 这一条轨是用户用文件替换过的：骨架不许再覆盖（刷新后仍然要守住）
+        manualTrack = meta.import?.wholeTrack === true;
         // 旧版本（没有上限时）存下来的长轨也要收一收
         enforceCueLimit();
       }
@@ -1023,7 +1157,12 @@
     // 与 1s 心跳维护，换行那一刻就是新的。
     const lines = lastLines;
     if (!lines || !lines.primary) return true;
-    return lines.primary === primary;
+    // 画面与轨道「同一句」的判据是互为前缀，不是完全相等（PLAN 053）：
+    // 轨道里的这句可能已经被合并成整句，而画面上官方还在分步上屏（半句是它的前缀）。
+    // 只认前缀关系仍然能挡住「时间轴落在上一句」的陈旧状态 —— 那种情况两边毫无前缀关系。
+    const live = lines.primary;
+    const trackText = primary || '';
+    return live === trackText || trackText.startsWith(live) || live.startsWith(trackText);
   }
 
   function getProgress() {
@@ -1124,6 +1263,61 @@
     return { applied, missed, fingerprintMismatch: importMismatch === true };
   }
 
+  /**
+   * 用一份 SRT 直接替换整条轨道（PLAN 052）。
+   *
+   * 与 `applyTranslations` 的区别：贴回是「按 start 找已有 cue」，句数与时间轴都以现有轨道为准；
+   * 这里是「文件说了算」—— 句数、时间轴、原文/译文全部换成文件里的。
+   *
+   * 替换后必须把骨架关掉：否则官方整条轨一旦晚到，就会把用户重新断好的句子覆盖回去。
+   * 落盘仍走我们自己的 `llgTrack:<videoId>`，官方缓存一个字节不写。
+   *
+   * @param {Array<{start:number,end:number,primary?:string,secondary?:string}>} list
+   * @returns {Promise<{applied:number}>}
+   */
+  async function replaceCues(list) {
+    const items = Array.isArray(list) ? list : [];
+    const next = [];
+
+    for (const item of items) {
+      const start = Number(item && item.start);
+      if (!Number.isFinite(start)) continue;
+
+      const primary = normalizeText(item.primary);
+      const secondary = normalizeText(item.secondary);
+      if (!primary && !secondary) continue;
+
+      const rawEnd = Number(item.end);
+      const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : start + DEFAULT_CUE_SECONDS;
+      next.push({ start, end, primary, secondary, origin: secondary ? 'imported' : 'official' });
+    }
+
+    if (!next.length) return { applied: 0 };
+
+    next.sort((a, b) => a.start - b.start);
+
+    closeActive();
+    cues = next;
+    enforceCueLimit();
+    active = null;
+    manualTrack = true;
+    lastKey = null;
+    lastLines = null;
+    importMismatch = null;
+    resetSkeletonAdoption();
+    skeleton.done = true;
+    skeleton.adopted = null;
+    invalidateEstimate();
+    meta = {
+      ...(meta || {}),
+      import: { at: Date.now(), fingerprint: null, wholeTrack: true },
+    };
+
+    notify();
+    await flush();
+    return { applied: cues.length };
+  }
+
   function snapshot() {
     return { meta: meta ? { ...meta } : null, cues: finalizedCues() };
   }
@@ -1132,6 +1326,7 @@
     closeActive();
     cues = [];
     active = null;
+    manualTrack = false;
     lastKey = null;
     importMismatch = null;
     resetSkeletonAdoption();
@@ -1179,6 +1374,7 @@
     // importMismatch 是内存里的比对结果（不落盘），面板靠它决定要不要提示
     getMeta: () => (meta ? { ...meta, importMismatch } : null),
     applyTranslations,
+    replaceCues,
     getVideoTime: currentTime,
     readLines,
     readPrimaryRich,
@@ -1191,6 +1387,13 @@
   Object.defineProperty(globalThis, NS, { value: api, configurable: true });
 
   // ---------------------------------------------------------------- 启动
+
+  // 官方写完整条轨的时刻不可预测（可能晚于我们 60 秒的轮询窗口），
+  // 所以必须靠 storage 事件，而不是继续加长轮询（PLAN 049）。
+  if (chrome.storage && chrome.storage.onChanged
+    && typeof chrome.storage.onChanged.addListener === 'function') {
+    chrome.storage.onChanged.addListener(onStorageChanged);
+  }
 
   document.addEventListener('yt-navigate-finish', () => {
     loadForCurrentVideo().catch((err) => warn(`切换视频失败：${err && err.message}`));

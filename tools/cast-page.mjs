@@ -153,8 +153,9 @@ export function renderPage(room, bootPrefs) {
     transform: scaleX(0); transform-origin: left center;
     will-change: transform;
   }
-  #fill-primary { background: rgba(10, 132, 255, .16); }
-  #fill-secondary { background: rgba(10, 132, 255, .11); }
+  /* 句内进度：与浮窗 --llg-accent-soft / --llg-accent-softer 同值（PLAN 047） */
+  #fill-primary { background: rgba(10, 132, 255, .14); }
+  #fill-secondary { background: rgba(10, 132, 255, .09); }
   #line-primary, #line-secondary {
     position: relative; display: block;
     line-height: 1.3; text-align: center; white-space: pre-wrap;
@@ -166,8 +167,8 @@ export function renderPage(room, bootPrefs) {
     font-size: .5em; font-weight: 400; letter-spacing: 0;
     opacity: .6; line-height: 1.15;
   }
-  /* 文节分隔符：与浮窗 .llg-sep 同一条（PLAN 035 压淡到只当停顿看） */
-  .llg-sep { margin: 0 .16em; opacity: .2; font-weight: 400; }
+  /* 文节分隔符：与浮窗 .llg-sep / 视频内 ::after 用同一组数值（PLAN 047） */
+  .llg-sep { margin: 0 .15em; opacity: .34; font-weight: 400; }
 
   /* 空态：与浮窗同一句文案 */
   #stage.empty::before {
@@ -951,7 +952,8 @@ export function renderPage(room, bootPrefs) {
     const cur = payload.cur || {};
     // 手机本地也留一份句子历史：快照没带 cues（旧扩展）时选句浮层靠它兜底
     rememberCue(payload.cue, cur.primary);
-    const sepText = style.separator || '|';
+    // 空串是「关闭分隔符」（PLAN 047），不能用 || 兜成竖线
+    const sepText = style.separator ?? '|';
     const key = JSON.stringify(cur.segments || []);
     if (key !== lastCurKey) {
       lastCurKey = key;
