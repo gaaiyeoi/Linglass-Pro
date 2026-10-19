@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="260" viewBox="0 0 720 260" font-family="PingFang SC, -apple-system, sans-serif">
+  <rect width="720" height="260" fill="#1e1e1e" rx="8"/>
+
+  <!-- 浏览器窗口外框 -->
+  <rect x="20" y="20" width="400" height="220" rx="8" fill="#2a2a2a" stroke="#444"/>
+  <circle cx="36" cy="34" r="4" fill="#ff5f56"/>
+  <circle cx="48" cy="34" r="4" fill="#ffbd2e"/>
+  <circle cx="60" cy="34" r="4" fill="#27c93f"/>
+  <text x="200" y="38" fill="#999" font-size="11" text-anchor="middle">YouTube 播放页</text>
+
+  <!-- 字幕区域 -->
+  <rect x="36" y="52" width="260" height="150" rx="4" fill="#000"/>
+  <text x="166" y="130" fill="#ffd" font-size="13" text-anchor="middle">官方双语字幕</text>
+  <text x="166" y="150" fill="#ffd" font-size="11" text-anchor="middle" opacity="0.7">（可点词查词）</text>
+  <path d="M60 180 L80 180 M90 180 L110 180 M120 180 L150 180" stroke="#6cf" stroke-width="2"/>
+  <text x="166" y="195" fill="#6cf" font-size="10" text-anchor="middle">③ 句内断句分隔符</text>
+
+  <!-- 学习面板 -->
+  <rect x="304" y="52" width="100" height="150" rx="4" fill="#243" stroke="#4a6"/>
+  <text x="354" y="70" fill="#9d9" font-size="10" text-anchor="middle">② 学习面板</text>
+  <rect x="312" y="80" width="84" height="14" fill="#2f4" opacity="0.3"/>
+  <rect x="312" y="98" width="84" height="14" fill="#394" opacity="0.5"/>
+  <rect x="312" y="116" width="84" height="14" fill="#2f4" opacity="0.3"/>
+  <text x="354" y="190" fill="#9d9" font-size="9" text-anchor="middle">逐句 · 可导出</text>
+
+  <!-- 箭头 -->
+  <path d="M424 100 C 460 90, 460 60, 500 50" stroke="#888" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#888"/>
+    </marker>
+  </defs>
+
+  <!-- 桌面字幕浮窗（系统级 PiP） -->
+  <rect x="500" y="40" width="200" height="110" rx="8" fill="#2a2a2a" stroke="#666"/>
+  <text x="600" y="58" fill="#ccc" font-size="10" text-anchor="middle">① 桌面字幕浮窗</text>
+  <text x="600" y="58" fill="#ccc" font-size="9" text-anchor="middle" dy="12">（脱离浏览器，常驻桌面）</text>
+  <rect x="512" y="78" width="176" height="44" rx="3" fill="#000"/>
+  <text x="600" y="96" fill="#ffd" font-size="10" text-anchor="middle" opacity="0.5">上一句</text>
+  <text x="600" y="110" fill="#ffd" font-size="11" text-anchor="middle">当前句</text>
+  <rect x="512" y="126" width="176" height="14" rx="3" fill="#333"/>
+  <circle cx="600" cy="133" r="4" fill="#6cf"/>
+
+  <text x="600" y="175" fill="#666" font-size="10" text-anchor="middle">最小化浏览器后依然留在桌面上</text>
+
+  <text x="360" y="245" fill="#777" font-size="11" text-anchor="middle">三个功能都挂在官方扩展之上，官方代码一个字节不改</text>
+</svg>
