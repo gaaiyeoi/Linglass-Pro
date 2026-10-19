@@ -27,8 +27,11 @@ const VENDOR_DIR = path.join(ROOT, 'vendor');
 const SRC_MOD = path.join(ROOT, 'src', 'mod');
 const DIST = path.join(ROOT, 'dist');
 
-/** 构建产物把 patch 位固定为 900，远离官方版本号，避免和商店更新撞号 */
-const MOD_PATCH = 900;
+/**
+ * 构建产物的 patch 位。远离官方版本号，避免和商店更新撞号。
+ * 900 是 Linglass-Pro 1.12.4.900 的发布号；本次发布用 901 以区分新旧包。
+ */
+const MOD_PATCH = 901;
 
 /** 我们的增量脚本只跑在 YouTube */
 const SITE_MATCHES = ['https://www.youtube.com/*'];
