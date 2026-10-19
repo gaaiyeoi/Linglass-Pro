@@ -64,10 +64,10 @@ async function harness({
   stored = {},
   settings = null,
 } = {}) {
-  // 桌面字幕自 PLAN 025 起默认**关闭**（用户选择「视频内嵌字幕优先」）。下面这一批
+  // 桌面字幕自 PLAN 040 起默认**关闭**（只有按钮/开关能打开）。下面这一批
   // 「桌面字幕：…」用例测的是**开关开着之后**的常驻行为（窗口被 UA 收走能不能回来、
-  // 点 X 算不算关闭……），所以这里默认预置落盘 enabled: true。
-  // 默认值本身由「桌面字幕：默认关闭（视频内嵌字幕优先）」那条用例覆盖（它传 noPipStored）。
+  // 点 X 算不算关闭……），预置 enabled: true 让它们不依赖默认值本身；
+  // 默认值由「桌面字幕：默认关闭（视频内嵌字幕优先），没开过就不弹窗」覆盖（它传 noPipStored）。
   if (withPip && !noPipStored && !(stored && stored.llgPip)) {
     stored = { ...stored, llgPip: { enabled: true } };
   }
@@ -113,6 +113,8 @@ async function harness({
     // 官方外观设置（chrome.storage.sync）与它的变更监听器
     sync: settings == null ? {} : { 'linglass-settings': settings },
     syncListeners: [],
+    /** 我们写回官方设置的原始 entry（chrome.storage.sync.set 的入参） */
+    syncWrites: [],
     features: [],
     timers: new Map(),
     intervals: [],
@@ -629,7 +631,12 @@ async function harness({
         // 官方「外观」设置落在 sync 区（zustand persist）
         sync: {
           get: () => Promise.resolve(h.sync),
-          set: () => Promise.resolve(),
+          set: (entry) => {
+            h.syncWrites.push(entry);
+            // 真实 storage 写入后立刻可读；桩件也照做，否则串行写的第二次读不到第一次
+            Object.assign(h.sync, entry);
+            return Promise.resolve();
+          },
         },
         onChanged: {
           addListener: (fn) => h.syncListeners.push(fn),
@@ -809,10 +816,16 @@ async function harness({
     const changes = { 'linglass-settings': { newValue: value } };
     for (const fn of [...h.syncListeners]) fn(changes, 'sync');
   };
+  /**
+   * 句内进度条的当前值。
+   *
+   * PLAN 046 起从 `style.width` 改成 `style.transform: scaleX(…)`（width 每帧
+   * 触发布局）；断言依然是在看「同一句读了多少」，只是换了 DOM 表现。
+   */
   h.pipFill = () => {
     const win = h.lastPipWindow();
     const fill = win && win.document.getElementById('fill-primary');
-    return fill ? fill.style.width : null;
+    return fill ? fill.style.transform : null;
   };
   /** 取浮窗里的按钮（按 id），用来断言文案/禁用态 */
   h.pipButton = (id) => {
@@ -904,6 +917,10 @@ async function harness({
   // 轨道在 applyTranslations 里跟它要 fingerprint（PLAN 031）
   vm.runInContext(await sourceOf('05-srt.js'), sandbox, {
     filename: '05-srt.js',
+  });
+  // 06-ai-translate.js 也是纯函数（PLAN 034），面板运行时按需取 globalThis 上的名字
+  vm.runInContext(await sourceOf('06-ai-translate.js'), sandbox, {
+    filename: '06-ai-translate.js',
   });
   vm.runInContext(await sourceOf('10-subtitle-track.js'), sandbox, {
     filename: '10-subtitle-track.js',
@@ -1994,17 +2011,436 @@ test('学习面板：把功能登记进设置面板注册表', async () => {
   for (const action of feature.actions) {
     assert.ok(action.id && action.title && action.icon, '操作行必须有 id / 标题 / 图标');
   }
+  assert.ok(feature.actions.some((a) => a.id === 'aiTranslate'), 'AI 翻译要有入口（PLAN 034）');
+});
+
+test('学习面板 AI 翻译：能打开设置层，没填 Key 时不发请求', async () => {
+  const { h } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  assert.equal(h.panelAct('aiTranslate'), true, '页脚的 AI 翻译按钮要能点到');
+  assert.equal(h.panelRole('sheet').dataset.state, 'open', '点开就是打开状态');
+
+  // 没 Key 就走不到 fetch：只提示，不抛错、不发请求
+  h.panelAct('aiRun');
+  await h.drain();
+  assert.match(h.panelRole('aiStatus').textContent, /API Key/);
+
+  assert.equal(h.panelAct('aiClose'), true);
+  assert.equal(h.panelRole('sheet').dataset.state, 'closed', '关闭后要收起来');
+  assert.equal(h.panelRole('panel').dataset.state, 'open', '关设置层不该把整个面板关掉');
+});
+
+test('学习面板 AI 翻译：逐批请求、按句贴回并打上导入优先级', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  h.currentTime = 1;
+  show(h, 'おはよう');
+  h.currentTime = 3;
+  show(h, 'ありがとう');
+  h.currentTime = 5;
+  show(h, 'さようなら');
+  assert.equal(track.getCues().length, 3);
+
+  // 桩 fetch：记下请求，并回一个与「待翻译」等长的 JSON 数组
+  const calls = [];
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    // user 内容是分段文本：从「待翻译」标签的下一行取出数组
+    const user = JSON.parse(options.body).messages[1].content;
+    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
+    const lines = texts.map((_, index) => `译文${index + 1}`);
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ choices: [{ message: { content: JSON.stringify(lines) } }] }),
+    });
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 6; i += 1) await h.drain();
+
+  assert.equal(calls.length, 1, '三句一批就够，不该拆成多次请求');
+  assert.equal(calls[0].url, 'https://example.com/v1/chat/completions');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer sk-test');
+
+  const translated = track.getCues().filter((cue) => cue.secondary);
+  assert.equal(translated.length, 3, '三句都要贴上译文');
+  // 沙箱数组带着另一份原型，strict 的 deepEqual 会比原型 —— 拼成串再比
+  assert.equal(translated.map((cue) => cue.secondary).join('|'), '译文1|译文2|译文3');
+  assert.equal(translated[0].origin, 'imported', '贴回的译文要打上优先级标记');
+  assert.match(h.panelRole('aiStatus').textContent, /已贴 3 \/ 3 句/);
+  // 三句一段时没有前后文，但仍然要带「待翻译」标签（模型靠它区分哪段要翻）
+  assert.match(JSON.parse(calls[0].options.body).messages[1].content, /【待翻译/);
+});
+
+test('学习面板 AI 翻译：条数不符时改用编号格式重试，不整段报废', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 3; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+
+  const calls = [];
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    const messages = JSON.parse(options.body).messages;
+    const user = messages[1].content;
+    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
+    const reply = (content) => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ choices: [{ message: { content } }] }),
+    });
+
+    if (messages[0].content.includes('JSON 对象')) {
+      const keyed = {};
+      texts.forEach((text, index) => { keyed[String(index + 1)] = `译:${text}`; });
+      return reply(JSON.stringify(keyed));
+    }
+    // 第一次故意少一条：模拟模型把相邻两条合并了
+    return reply(JSON.stringify(texts.slice(0, texts.length - 1).map((text) => `译:${text}`)));
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 6; i += 1) await h.drain();
+
+  assert.equal(calls.length, 2, '第一次条数不符，换格式重试一次');
+  assert.match(JSON.parse(calls[1].options.body).messages[0].content, /JSON 对象/,
+    '重试要用编号对象格式');
+  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 3, '三句都要贴上');
+  assert.match(h.panelRole('aiStatus').textContent, /已贴 3 \/ 3 句/);
+});
+
+test('学习面板 AI 翻译：分多段时每段都带前后文（缩写的上下文）', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 23; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+  assert.equal(track.getCues().length, 23);
+
+  const calls = [];
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    const user = JSON.parse(options.body).messages[1].content;
+    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: JSON.stringify(texts.map((t) => `译:${t}`)) } }],
+      }),
+    });
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 8; i += 1) await h.drain();
+
+  assert.equal(calls.length, 2, '23 句按 20 + 3 切两段');
+  const first = JSON.parse(calls[0].options.body).messages[1].content;
+  const second = JSON.parse(calls[1].options.body).messages[1].content;
+
+  assert.match(first, /【后文｜只作参考，不要翻译，不要输出】\n\["句21"/, '第一段要看到后文');
+  assert.match(first, /【待翻译｜[^\n]*\n\["句1",/, '待翻译仍然从第一句开始');
+  assert.match(second, /【前文｜只作参考，不要翻译，不要输出】\n\["句1",.*"句20"\]/,
+    '第二段要看到前面的原文窗口（离它最近的一段）');
+  assert.ok(!second.includes('【后文'), '最后一段没有后文');
+
+  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 23);
+});
+
+test('学习面板 AI 翻译：勾选整片上下文后每次请求都带全片编号原文', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 30; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+
+  const calls = [];
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    const user = JSON.parse(options.body).messages[1].content;
+    const range = /【本次要翻译的条号】(\d+)-(\d+)/.exec(user);
+    const keyed = {};
+    for (let n = Number(range[1]); n <= Number(range[2]); n += 1) keyed[String(n)] = `译${n}`;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: JSON.stringify(keyed) } }],
+      }),
+    });
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+  h.panelRole('aiWhole').checked = true;
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 8; i += 1) await h.drain();
+
+  assert.equal(calls.length, 2, '30 句 → 20 + 10，两段；整片模式不需要额外的语境整理');
+  const first = JSON.parse(calls[0].options.body).messages[1].content;
+  assert.match(first, /【全片字幕｜键是条号，只翻译第 1-20 条】/);
+  assert.match(first, /"30":"句30"/, '整片 30 句都要在里面');
+  assert.match(JSON.parse(calls[1].options.body).messages[1].content, /第 21-30 条/);
+
+  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 30);
+  assert.match(h.panelRole('aiStatus').textContent, /已贴 30 \/ 30 句/);
+});
+
+test('学习面板 AI 翻译：整片模式下条数不符仍留在整片重试，不退化成分段', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 6; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+
+  const calls = [];
+  const respond = (content) => Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ choices: [{ message: { content } }] }),
+  });
+
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    // 第一次模拟「模型把两条合并了」：6 条只回 5 条
+    if (calls.length === 1) return respond(JSON.stringify(['译1', '译2', '译3', '译4', '译5']));
+
+    const user = JSON.parse(options.body).messages[1].content;
+    const range = /【本次要翻译的条号】(\d+)-(\d+)/.exec(user);
+    const keyed = {};
+    for (let n = Number(range[1]); n <= Number(range[2]); n += 1) keyed[String(n)] = `译${n}`;
+    return respond(JSON.stringify(keyed));
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+  h.panelRole('aiWhole').checked = true;
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 8; i += 1) await h.drain();
+
+  assert.equal(calls.length, 2, '失败一次后只重试一次');
+  const retryUser = JSON.parse(calls[1].options.body).messages[1].content;
+  assert.match(retryUser, /【全片字幕/, '重试仍带全片原文（不是退化成分段）');
+  assert.match(JSON.parse(calls[1].options.body).messages[0].content, /JSON 对象/,
+    '重试换成编号对象格式');
+  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 6);
+  assert.match(h.panelRole('aiStatus').textContent, /已贴 6 \/ 6 句/);
+});
+
+test('学习面板 AI 翻译：轨道被重建后按原文唯一匹配贴回', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 3; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+
+  let requests = 0;
+  sandbox.fetch = () => {
+    requests += 1;
+    // 模拟官方重新断句：翻译期间轨道整条被重建，start 全部挪了 4 秒
+    for (const cue of track.getCues()) cue.start += 4;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: JSON.stringify(['译1', '译2', '译3']) } }],
+      }),
+    });
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 6; i += 1) await h.drain();
+
+  assert.equal(requests, 1, '文本能对上就不该重发请求');
+  assert.equal(track.getCues().map((cue) => cue.secondary).join('|'), '译1|译2|译3',
+    'start 变了也要按原文唯一匹配贴回');
+  assert.match(h.panelRole('aiStatus').textContent, /已贴 3 \/ 3 句/);
+});
+
+test('学习面板 AI 翻译：贴不上时原因不再停留在更早的解析失败', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 3; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+
+  const calls = [];
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    if (calls.length === 1) {
+      // 第一次条数不符 → 触发编号格式重试，同时把这句话记进 lastReason
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: JSON.stringify(['译1', '译2']) } }],
+        }),
+      });
+    }
+    // 重试拿到了合格格式，但轨道此刻已经换成另一部片的句子 → 一句都贴不上
+    for (const cue of track.getCues()) {
+      cue.start += 30;
+      cue.primary = `别的句子${cue.start}`;
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: JSON.stringify({ 1: '译1', 2: '译2', 3: '译3' }) } }],
+      }),
+    });
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 8; i += 1) await h.drain();
+
+  const status = h.panelRole('aiStatus').textContent;
+  assert.equal(calls.length, 2, '条数不符只重试一次');
+  assert.match(status, /3 句没翻成/, '三句都贴不上');
+  assert.match(status, /轨道上找不到对应原文/, '原因要说真实的那条');
+  assert.ok(!status.includes('条数不符'), '不能把更早那次解析失败当成最终原因');
+  assert.match(status, /原文轨在翻译期间变了/, '指纹变化要交代');
+});
+
+test('学习面板 AI 翻译：长轨道先整理全片语境，再逐段翻译', async () => {
+  const { sandbox, h, track } = await harness({ withPanel: true });
+  await h.drain();
+
+  h.togglePanel();
+  await h.drain();
+
+  for (let i = 0; i < 40; i += 1) {
+    h.currentTime = i * 2 + 1;
+    show(h, `句${i + 1}`);
+  }
+
+  const calls = [];
+  sandbox.fetch = (url, options) => {
+    calls.push({ url, options });
+    const user = JSON.parse(options.body).messages[1].content;
+    if (user.includes('【全片字幕')) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: '主题：闲聊。术语：丸ハラ=句号骚扰' } }],
+        }),
+      });
+    }
+    const texts = JSON.parse(/(【待翻译[^\n]*\n)(\[.*\])/.exec(user)[2]);
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: JSON.stringify(texts.map((t) => `译:${t}`)) } }],
+      }),
+    });
+  };
+
+  h.panelAct('aiTranslate');
+  h.panelRole('aiProvider').value = 'custom';
+  h.panelRole('aiBase').value = 'https://example.com/v1';
+  h.panelRole('aiModel').value = 'test-model';
+  h.panelRole('aiKey').value = 'sk-test';
+
+  h.panelAct('aiRun');
+  for (let i = 0; i < 12; i += 1) await h.drain();
+
+  assert.equal(calls.length, 3, '一次语境整理 + 两段翻译（40 句按 20 切）');
+  assert.match(JSON.parse(calls[0].options.body).messages[1].content, /【全片字幕｜按时间顺序】/);
+
+  const firstBatch = JSON.parse(calls[1].options.body).messages;
+  assert.match(firstBatch[0].content, /【全片语境/, '摘要要进 system');
+  assert.match(firstBatch[0].content, /丸ハラ=句号骚扰/, '术语译法要带进每一段');
+
+  assert.equal(track.getCues().filter((cue) => cue.secondary).length, 40);
 });
 
 // ---------------------------------------------------------------- 桌面字幕常驻
 
 /**
- * PLAN 025 改了默认值：用户选择「视频内嵌字幕优先」——官方那层字幕本来就在画面里
- * （还能点词查词），没表过态时不该再自动多弹一扇系统窗口。
+ * PLAN 040 恢复「默认关闭」：浮窗只由控制栏按钮 / 设置面板开关打开。
  *
- * ⚠️ 这条用例**替换**了原来的「桌面字幕：默认开启，但要等第一次用户手势才真正开窗」
- * （旧断言固化了 PLAN 016 的旧语义「默认开启」，而本轮需求就是改掉它）。
- * 旧用例想守住的另一半「开启之后要等第一次用户手势、且落盘」在新用例里继续断言。
+ * ⚠️ 这条用例**替换**了 PLAN 039 的「默认开启，进播放页后第一次手势就开窗」。
+ * 它同时钉住三件事：默认值、加载时不许硬开、页面手势也不许开。
  */
 test('桌面字幕：默认关闭（视频内嵌字幕优先），没开过就不弹窗', async () => {
   const { sandbox, h } = await harness({ withPip: true, noPipStored: true });
@@ -2015,7 +2451,7 @@ test('桌面字幕：默认关闭（视频内嵌字幕优先），没开过就�
   assert.equal(pip.isOpen(), false);
   assert.equal(h.pip.requestCount, 0, '加载时不能硬开');
 
-  // 默认关着 → 页面手势也不该把窗口顶出来（否则「默认关闭」形同虚设）
+  // 默认关着 → 点页面任意处（播放/暂停、点封面……）都不该把窗口顶出来
   h.gesture();
   await h.drain();
   assert.equal(h.pip.requestCount, 0, '没开过的功能不许被手势自动打开');
@@ -2454,9 +2890,14 @@ function withAppearance(patch) {
   return { ...APPEARANCE, state: { ...APPEARANCE.state, ...patch } };
 }
 
-test('桌面字幕：浮窗外观首次从官方拷来当初始值，之后官方再改都不动', async () => {
+test('桌面字幕：浮窗外观始终跟随官方设置（样式/字号/颜色/双语/语言）', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
   const pip = sandbox.__llgModPip;
+
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  await h.drain();
+  h.gesture();
   await h.drain();
 
   // 官方 100% 档：基座 24px，原文行（日语算 CJK）27px、译文行 20px
@@ -2464,57 +2905,97 @@ test('桌面字幕：浮窗外观首次从官方拷来当初始值，之后官�
   assert.match(pip.pipCss(), /#line-secondary \{[^}]*font-size: 20px/);
   assert.doesNotMatch(pip.pipCss(), /clamp\(|vw/, '字号不许跟浮窗尺寸走');
 
-  // 首次播种要落盘，而且存的是**完整四项** —— 完全独立之后缺项没法再去官方补
-  const seeded = h.saved.find((entry) => entry.llgPipAppearance);
-  assert.ok(seeded, '首次打开要把官方的当前值播种进落盘');
-  assert.deepEqual({ ...seeded.llgPipAppearance },
-    { style: 'classic', scale: 100, color: '#FFFFFF', dual: true, ctxLines: pip.CTX_DEFAULT });
+  // 官方那边改 → 浮窗立刻跟着改（PLAN 033：官方设置是唯一真相）
+  h.changeSettings(withAppearance({
+    subtitleScale: 150,
+    subtitleColor: '#FFD60A',
+    subtitleStyle: 'cinema',
+    dualSubtitles: false,
+    learningLanguage: 'en',
+  }));
 
-  // 官方那边怎么改都不动了（PLAN 027：浮窗完全独立）
+  assert.equal(pip.official().subtitleScale, 150);
+  assert.equal(pip.official().learningLanguage, 'en');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 36px/, '英语不放大：24 × 1.5');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #FFD60A/);
+  assert.doesNotMatch(pip.pipCss(), /#plate \{[^}]*background/, 'cinema 不画底板');
+  assert.equal(h.pipButton('line-secondary').textContent, '', '关掉双语就不渲染译文行');
+
+  // 只剩「上下文行数」是浮窗自己的设置，它不该被官方设置覆盖
+  pip.setPipOption({ ctxLines: 2 });
   h.changeSettings(withAppearance({ subtitleScale: 150, subtitleColor: '#FFD60A' }));
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 27px/, '字号不跟官方');
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #FFFFFF/, '颜色也不跟官方');
+  assert.equal(pip.pipOption().ctxLines, 2);
 });
 
-test('桌面字幕：官方那份读不成/读坏了时，播种用默认值（不是拿脏值当初值）', async () => {
-  // 落盘是 JSON 字符串（zustand persist 的另一种形态）也要认；档位是 0 → 退回默认 100%
-  const { sandbox, h } = await harness({
+test('桌面字幕：官方设置读不成 / 写坏了都逐项退回默认值', async () => {
+  const dirty = await harness({
     withPip: true,
-    settings: JSON.stringify(withAppearance({ subtitleScale: 0, subtitleStyle: 'nope' })),
+    settings: JSON.stringify(withAppearance({
+      subtitleScale: 0,
+      subtitleStyle: 'nope',
+      subtitleColor: 'red',
+      dualSubtitles: 'yes',
+    })),
   });
-  await h.drain();
+  await dirty.h.drain();
 
-  const seeded = h.saved.find((entry) => entry.llgPipAppearance);
-  assert.equal(seeded.llgPipAppearance.scale, 100, '档位被写坏 → 官方默认 100%');
-  assert.equal(sandbox.__llgModPip.appearanceOwn().style, 'classic', '预设不认得 → 默认 classic');
-  assert.match(sandbox.__llgModPip.pipCss(), /#line-primary \{[^}]*font-size: 27px/);
+  const official = dirty.sandbox.__llgModPip.official();
+  assert.equal(official.subtitleScale, 100, '档位 0 被夹回默认 100%');
+  assert.equal(official.subtitleStyle, 'classic', '预设不认得 → classic');
+  assert.equal(official.subtitleColor, '#FFFFFF', '颜色不是 #RRGGBB → 默认白');
+  assert.equal(official.dualSubtitles, true);
+  assert.match(dirty.sandbox.__llgModPip.pipCss(), /#line-primary \{[^}]*font-size: 27px/);
 
-  // 官方那份整个读不到（被裁剪的包 / 首次安装）→ 同样退回默认值
+  // 整个读不到（被裁剪的包 / 首次安装）→ 默认值
   const bare = await harness({ withPip: true });
   await bare.h.drain();
-  assert.equal(bare.sandbox.__llgModPip.appearanceOwn().scale, 100);
+  assert.equal(bare.sandbox.__llgModPip.official().subtitleScale, 100);
+  assert.equal(bare.sandbox.__llgModPip.official().enabled, true);
 });
 
-test('桌面字幕：落盘里有浮窗外观时就用它，官方那份已经无关', async () => {
+test('桌面字幕：观看模式逐字段夹取，说明行按官方中文片段拼', async () => {
+  const { sandbox } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+
+  const dirty = pip.normalizeViewing({
+    mode: 'repeat',
+    repeat: { count: 9, rate: .3 },
+    pause: { at: 'nope' },
+    listen: { target: 'both', cover: 'nope' },
+    showHints: 'yes',
+  });
+  assert.deepEqual({ ...dirty.repeat }, { count: 2, rate: 1 }, '不在表里的值逐项回默认');
+  assert.equal(dirty.pause.at, 'after');
+  assert.equal(dirty.listen.cover, 'blur');
+  assert.equal(dirty.showHints, true, '非布尔也回默认');
+
+  assert.equal(pip.viewingCaption({ ...dirty, mode: 'normal' }), '无需设置——视频不间断播放。');
+  assert.equal(pip.viewingCaption({ ...dirty, mode: 'pause', pause: { at: 'after', length: 'manual' } }),
+    '每行之后暂停，直到你自己继续播放。');
+  assert.equal(pip.viewingCaption({ ...dirty, mode: 'pause', pause: { at: 'before', length: 'cue' } }),
+    '每行之前暂停，与该行时长相同。');
+  assert.equal(pip.viewingCaption({ ...dirty, mode: 'repeat' }), '该行播放 2 次，与视频速度相同。');
+  assert.equal(pip.viewingCaption({ ...dirty, mode: 'listen', listen: { target: 'primary', cover: 'blur', length: 'manual' } }),
+    '原文行用模糊隐藏。该行结束后暂停，直到你自己继续播放。把鼠标移到该行或暂停视频即可看到。');
+});
+
+test('桌面字幕：旧的 llgPipAppearance 只迁移上下文行数，外观字段一律忽略', async () => {
   const { sandbox, h } = await harness({
     withPip: true,
     settings: withAppearance({ subtitleScale: 150 }),
     stored: {
-      llgPipAppearance: { style: 'contrast', scale: 130, color: '#64D2FF', dual: false },
+      llgPipAppearance: { style: 'contrast', scale: 130, color: '#64D2FF', dual: false, ctxLines: 2 },
     },
   });
   const pip = sandbox.__llgModPip;
   await h.drain();
 
-  // 130% → 基座 31.2，原文行 31.2 × 27/24 = 35.1（官方那边是 150%，照样不管）
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 35\.1px/);
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #64D2FF/);
-  assert.match(pip.pipCss(), /\.kline \{[^}]*background: rgba\(0, 0, 0, 0\.88\)/,
-    'contrast 是逐行底板');
-  assert.ok(
-    !h.saved.some((entry) => entry.llgPipAppearance),
-    '落盘里已经有 → 既不重写也不拿官方覆盖',
-  );
+  assert.deepEqual({ ...pip.pipOption() }, { ctxLines: 2 }, '只迁移 ctxLines');
+  // 150% → 基座 36，原文行 36 × 27/24 = 40.5
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/, '字号来自官方，不是旧落盘');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #FFFFFF/, '颜色也来自官方');
+  assert.match(pip.pipCss(), /#plate \{[^}]*background/, 'classic 才画整块底板');
+  assert.ok(!h.saved.some((entry) => entry.llgPipAppearance), '读旧值不该顺手重写');
 });
 
 test('桌面字幕：窗口能拖小（内容里不许有固有最小尺寸）', async () => {
@@ -2543,11 +3024,12 @@ test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async (
   h.gesture();
   await h.drain();
 
-  // 100% 档 + classic 底板 + 双语 + 默认 1 段上下文行（下一句的原文与译文各 ×0.8）≈ 202px
-  // （旧的 264 上下各留一大块空白；只有当前句时是 145px 上下）
+  // 100% 档 + classic 底板 + 双语 + 默认 1 段上下文行（下一句的原文与译文各 ×0.7）
+  // ≈ 250px（内容 ≈ 202 + PLAN 038 的 48px 呼吸位）
   const fit = h.pip.lastOptions;
-  assert.ok(fit.height > 180 && fit.height < 230, `默认高度要贴合内容，实际 ${fit.height}`);
-  assert.ok(fit.width < 1000, '宽度不该再留一大块黑边');
+  assert.ok(fit.height > 220 && fit.height < 300, `默认高度要贴合内容，实际 ${fit.height}`);
+  // PLAN 045：860 → 1040（长难句少折一行）
+  assert.ok(fit.width >= 1020 && fit.width < 1100, `默认宽度 1040，实际 ${fit.width}`);
 
   // 字号不跟窗口走 → 窗口就得跟字号走：150% 档那次开窗必须明显更高
   const big = await harness({ withPip: true, settings: withAppearance({ subtitleScale: 150 }) });
@@ -2579,7 +3061,82 @@ test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async (
   );
 });
 
-test('桌面字幕：样式条上改字号/预设/颜色/双语立即生效并落盘', async () => {
+test('桌面字幕：长句按日文禁则断行，并尽量让两行一样长（PLAN 045）', async () => {
+  const { h } = await harness({ withPip: true, settings: APPEARANCE });
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  const css = h.pipCss();
+  assert.match(
+    css,
+    /#line-primary, #line-secondary \{[^}]*line-break: strict/,
+    '日文禁则：不让小假名 / 开括号 / 标点落在行首',
+  );
+  assert.match(
+    css,
+    /#line-primary, #line-secondary \{[^}]*text-wrap: balance/,
+    '折两行时长度要接近，而不是第二行只剩两个字',
+  );
+});
+
+test('长句排版：往官方字幕浮层注入禁则与均衡折行样式，且幂等', async () => {
+  const styles = [];
+  const root = {
+    querySelector(sel) {
+      return styles.find((style) => '#' + style.id === sel) || null;
+    },
+    prepend(node) {
+      styles.unshift(node);
+    },
+  };
+  const ticks = [];
+  // 宿主可换：官方重建播放器时整棵 shadowRoot 都会被替换（见用例末尾）
+  const host = { shadowRoot: root };
+  const sandbox = {
+    console,
+    document: {
+      getElementById: (id) => (id === 'linglass-subtitle-overlay' ? host : null),
+      createElement: (tag) => ({ tagName: tag.toUpperCase(), id: '', textContent: '' }),
+    },
+  };
+  sandbox.__llgModShared = {
+    onTick: (fn) => {
+      ticks.push(fn);
+      return () => {};
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(await sourceOf('12-longline.js'), sandbox, { filename: '12-longline.js' });
+
+  assert.equal(styles.length, 1, '应当往官方 shadowRoot 注入一张样式表');
+  const css = styles[0].textContent;
+  assert.match(css, /line-break:\s*strict/, '日文禁则');
+  assert.match(css, /text-wrap:\s*balance/, '均衡折行');
+  assert.match(css, /max-width:\s*96% !important/, '原文行可用宽度放宽到 96%');
+  assert.match(css, /width:\s*98% !important/, '浮层宽度放宽到 98%');
+
+  // 心跳每秒都会进来一次；官方重建浮层之外的时机都必须早退，不能越插越多
+  sandbox.__llgModLongline.refresh();
+  for (const fn of ticks) fn();
+  assert.equal(styles.length, 1, '幂等：样式已经在就不写');
+
+  // 官方重建播放器 → 换了一棵 shadowRoot：新树里没有样式，必须补注入
+  const rebuiltStyles = [];
+  host.shadowRoot = {
+    querySelector(sel) {
+      return rebuiltStyles.find((style) => '#' + style.id === sel) || null;
+    },
+    prepend(node) {
+      rebuiltStyles.unshift(node);
+    },
+  };
+  for (const fn of ticks) fn();
+  assert.equal(rebuiltStyles.length, 1, '换了 shadowRoot 要重新注入');
+  assert.equal(styles.length, 1, '旧树不该被重复写');
+});
+
+test('桌面字幕：设置面板改字号/预设/颜色/双语 → 立即生效并写回官方设置', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
   const pip = sandbox.__llgModPip;
 
@@ -2597,47 +3154,137 @@ test('桌面字幕：样式条上改字号/预设/颜色/双语立即生效并�
     'classic 的译文行是同色 ×.75（官方 secondaryAlpha）');
   assert.match(classic, /#plate \{[^}]*background: linear-gradient/, 'classic 的底板画在整块上');
 
-  // 字号：走真实的点击链路（data-act → command），改一档就生效 + 落盘 + 回显
-  h.pipClick('scale+');
-  assert.equal(pip.appearanceOwn().scale, 110);
-  assert.match(h.pipCss(), /#line-primary \{[^}]*font-size: 29\.7px/, '110% → 26.4 × 27/24');
-  assert.equal(h.saved.at(-1).llgPipAppearance.scale, 110, '改一下就要落盘');
-  assert.equal(h.pipButton('scale-val').textContent, '110%', '样式条回显当前档位');
-  h.pipClick('scale-');
-  assert.equal(pip.appearanceOwn().scale, 100, '减回去');
+  // 打开设置页：字幕区与控制栏一起让位
+  h.pipClick('appearance');
+  assert.equal(pip.barMode(), 'root');
+  assert.equal(h.pipButton('settings').style.display, '');
+  assert.equal(h.pipButton('bar').style.display, 'none');
+  assert.equal(h.pipButton('stage').style.display, 'none');
 
-  // 预设：cinema 不画底板，改用描边；选中的那个按钮要有标记
+  // 字号：走真实的点击链路（data-act → command），改一档就生效 + 写回官方
+  h.pipClick('scale+');
+  await h.drain();
+  assert.equal(pip.official().subtitleScale, 110);
+  assert.equal(pip.fontSizeFromScale(110), 26, '官方 ma()：round(110/100 × 24)');
+  assert.match(h.pipCss(), /#line-primary \{[^}]*font-size: 29\.7px/, '110% → 26.4 × 27/24');
+
+  const write = h.syncWrites.at(-1)['linglass-settings'];
+  assert.ok(write, '改一下就要写回 chrome.storage.sync');
+  const parsed = JSON.parse(write);
+  assert.equal(parsed.version, 4, '保持官方 zustand persist 的版本号');
+  assert.equal(parsed.state.subtitleScale, 110);
+  assert.equal(parsed.state.fontSize, 26, 'fontSize 是官方从档位派生的字段，必须一起带');
+
+  h.pipClick('scale-');
+  await h.drain();
+  assert.equal(pip.official().subtitleScale, 100, '减回去');
+
+  // 预设：cinema 不画底板，改用描边
   h.pipClick('style:cinema');
+  await h.drain();
+  assert.equal(pip.official().subtitleStyle, 'cinema');
   assert.doesNotMatch(h.pipCss(), /#plate \{[^}]*background/, 'cinema 不画底板');
   assert.match(h.pipCss(), /#line-primary \{[^}]*paint-order: stroke fill/, 'cinema 靠描边保证可读');
-  assert.equal(h.pipButton('pip-style-cinema').dataset.on, '1');
-  assert.equal(h.pipButton('pip-style-classic').dataset.on, undefined, '没选中的不能有标记');
 
   // 颜色：小写也认，但生效与落盘一律大写
   h.pipClick('color:#ffd60a');
+  await h.drain();
+  assert.equal(pip.official().subtitleColor, '#FFD60A');
   assert.match(h.pipCss(), /#line-primary \{[^}]*color: #FFD60A/);
-  assert.equal(h.pipButton('pip-color-FFD60A').dataset.on, '1');
-  assert.equal(pip.appearanceOwn().color, '#FFD60A');
 
-  // 双语：浮窗自己的开关（不再只能跟官方）
-  h.pipClick('dual');
+  // 双语：官方开关，写回之后浮窗与页面内字幕一起变
+  h.pipClick('toggle:dualSubtitles');
+  await h.drain();
+  assert.equal(pip.official().dualSubtitles, false);
   assert.equal(h.pipButton('line-secondary').textContent, '', '关掉就不渲染译文行');
-  assert.equal(h.pipButton('pip-dual').dataset.on, undefined);
-  h.pipClick('dual');
+  h.pipClick('toggle:dualSubtitles');
+  await h.drain();
   assert.equal(h.pipButton('line-secondary').textContent, '测试', '再打开就回来');
-  assert.equal(h.pipButton('pip-dual').dataset.on, '1');
 
-  // 脏值挡在 command 里（不是靠 UI 藏起来）：不认得的预设 / 颜色一律不生效、不落盘
-  const before = h.saved.length;
-  const styleBefore = pip.appearanceOwn().style;
+  // 脏值挡在 command 里（不是靠 UI 藏起来）：不认得的预设 / 颜色 / 语言一律不写盘
+  const writes = h.syncWrites.length;
   h.pipClick('style:nope');
   h.pipClick('color:#123456');
-  assert.equal(pip.appearanceOwn().style, styleBefore, '不认得的预设不生效');
-  assert.equal(pip.appearanceOwn().color, '#FFD60A', '不在色板里的颜色不生效');
-  assert.equal(h.saved.length, before, '也不许写进落盘');
+  h.pipClick('lang:learningLanguage:xx');
+  await h.drain();
+  assert.equal(h.syncWrites.length, writes, '脏值不许写回官方设置');
+  assert.equal(pip.official().subtitleStyle, 'cinema');
+  assert.equal(pip.official().subtitleColor, '#FFD60A');
 });
 
-test('桌面字幕：样式条与控制栏互斥，字幕区一个节点都不动', async () => {
+test('桌面字幕：官方亮色面板 CSS 转成暗色，投影与白字不动', async () => {
+  const { sandbox } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+
+  const light = [
+    '.settings-panel { background: #FFFFFF; color: #1D1D1F; }',
+    '.segmented { background: rgba(0,0,0,0.04); }',
+    '.segmented-option.active { background: #FFFFFF; color: #1D1D1F; }',
+    '.toggle-knob { background: #FFFFFF; }',
+    '.color-btn { box-shadow: 0 1px 3px rgba(0,0,0,0.15); }',
+    '.x { color: #636366; } .y { color: #8E8E93; }',
+  ].join('\n');
+
+  const dark = pip.darkPanelCss(light);
+  assert.doesNotMatch(dark, /#1D1D1F/, '亮色主文字必须换掉');
+  assert.match(dark, /\.settings-panel \{[^}]*color: #FFFFFF/, '主文字变白');
+  assert.match(dark, /\.x \{ color: #8E8E93; \}/, '次级灰 → 暗色次级灰');
+  assert.match(dark, /\.y \{ color: #636366; \}/, '三级灰互换，不被二次替换');
+  assert.match(dark, /background: rgba\(255,255,255,0.07\)/, '亮色按钮底色反相');
+  assert.match(dark, /\.toggle-knob \{ background: #FFFFFF; \}/, '滑块两个主题都是白');
+  assert.match(dark, /box-shadow: 0 1px 3px rgba\(0,0,0,0.15\)/, '写死的投影不动');
+
+  assert.equal(
+    pip.darkPanelCss('.a { color: #FFFFFF; }'),
+    '.a { color: #FFFFFF; }',
+    '已经是暗色（找不到 #1D1D1F）就原样返回',
+  );
+});
+
+/**
+ * PLAN 041：`svgIcon()` 只写 viewBox、不写 width/height 属性，尺寸只能由 CSS 给。
+ * 官方的尺寸规则只在「用户先打开过官方面板」时才拷得到，取不到就走兜底 ——
+ * 那时任何一个漏了尺寸的图标都会按 300×150 渲染，把整行撑爆（截图里的巨型箭头）。
+ * 所以断言：凡是交给 svgIcon 的类，PANEL_CSS 里必须有 width/height。
+ */
+test('桌面字幕：面板图标尺寸写在 PANEL_CSS 里，不依赖官方那份拷贝', async () => {
+  const source = await sourceOf('30-desktop-subtitles.js');
+  const block = source.match(/const PANEL_CSS = `([\s\S]*?)`;/);
+  assert.ok(block, '找不到 PANEL_CSS');
+
+  // 先剥注释：注释里没有花括号，会被并进「选择器」一段，让类名比对失效
+  const css = block[1].replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    selectors: m[1].split(',').map((s) => s.trim()),
+    decl: m[2],
+  }));
+
+  function declOf(className) {
+    return rules
+      .filter((rule) => rule.selectors.includes(`.${className}`))
+      .map((rule) => rule.decl)
+      .join('\n');
+  }
+
+  const classes = [...source.matchAll(/svgIcon\(d,\s*'([^']+)'/g)].map((m) => m[1]);
+  assert.ok(classes.length >= 5, `应当扫到多个图标类，实际只有 ${classes.length} 个`);
+
+  for (const name of new Set(classes)) {
+    const decl = declOf(name);
+    assert.ok(decl, `PANEL_CSS 里找不到 .${name} 的规则`);
+    assert.match(decl, /width:\s*[\d.]+px/, `.${name} 没有 width`);
+    assert.match(decl, /height:\s*[\d.]+px/, `.${name} 没有 height`);
+  }
+
+  // 这两处 SVG 不走 svgIcon 的 className（片段里没有 class），只能按后代选择器钉尺寸
+  assert.match(block[1], /\.font-btn svg \{[^}]*width:\s*14px/, '加减按钮的图标没有尺寸');
+  assert.match(block[1], /\.style-btn__art svg \{[^}]*width:\s*26px/, '字幕样式缩略图的图标没有尺寸');
+
+  // 语言名必须单行省略，否则窄一点就会被压成竖排单字
+  assert.match(declOf('lang-trigger-name'), /white-space:\s*nowrap/);
+});
+
+test('桌面字幕：设置页与字幕区互斥，分页切换只改 display', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
   const pip = sandbox.__llgModPip;
 
@@ -2649,17 +3296,24 @@ test('桌面字幕：样式条与控制栏互斥，字幕区一个节点都不�
 
   assert.equal(pip.barMode(), 'play');
   assert.equal(h.pipButton('bar').style.display, '');
-  assert.equal(h.pipButton('stylebar').style.display, 'none', '默认收起');
+  assert.equal(h.pipButton('settings').style.display, 'none', '默认不显示设置页');
 
   h.pipClick('appearance');
-  assert.equal(pip.barMode(), 'style');
+  assert.equal(pip.barMode(), 'root');
   assert.equal(h.pipButton('bar').style.display, 'none');
-  assert.equal(h.pipButton('stylebar').style.display, '');
-  assert.equal(h.pipText(), 'テスト', '切换不动字幕');
+  assert.equal(h.pipButton('progress').style.display, 'none', '设置页不显示整片进度条');
+  assert.equal(h.pipButton('stage').style.display, 'none');
+  assert.equal(h.pipText(), 'テスト', '切换不动字幕内容');
 
-  h.pipClick('appearance');
-  assert.equal(pip.barMode(), 'play');
-  assert.equal(h.pipButton('bar').style.display, '');
+  h.pipClick('page:modes');
+  assert.equal(pip.barMode(), 'modes', '子页可以进');
+  h.pipClick('page-back');
+  assert.equal(pip.barMode(), 'root', '返回上一级');
+  h.pipClick('settings-close');
+  assert.equal(pip.barMode(), 'play', '× 回到字幕');
+  assert.equal(h.pipButton('settings').style.display, 'none');
+  assert.equal(h.pipButton('stage').style.display, '');
+  assert.equal(h.pipButton('progress').style.display, '', '回到字幕就恢复进度条');
 
   // 窗口被 UA 关掉、再过一次手势重开：新窗口从播放控制栏开始，不继承上一扇窗的状态
   h.pipClick('appearance');
@@ -2670,79 +3324,88 @@ test('桌面字幕：样式条与控制栏互斥，字幕区一个节点都不�
 
   assert.equal(pip.isOpen(), true);
   assert.equal(pip.barMode(), 'play', '新窗口从播放控制栏开始');
-  assert.equal(h.pipButton('stylebar').style.display, 'none');
+  assert.equal(h.pipButton('settings').style.display, 'none');
 });
 
-test('桌面字幕：↺ 把官方当前的设置重新拷一份当浮窗样式', async () => {
+test('桌面字幕：Aa 只负责打开设置，连点两次不会收起面板', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
   const pip = sandbox.__llgModPip;
-
   h.currentTime = 5;
   show(h, 'テスト', '测试');
   await h.drain();
   h.gesture();
   await h.drain();
 
-  pip.setAppearanceOwn({ scale: 150, color: '#FFD60A' });
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/);
+  h.pipClick('appearance');
+  assert.equal(pip.barMode(), 'root');
 
-  // 官方那边改成 60% / 绿色：浮窗常态下不跟它，但「复位」要把官方此刻的值请回来
-  h.changeSettings(withAppearance({ subtitleScale: 60, subtitleColor: '#30D158' }));
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 40\.5px/, '常态下不跟官方');
+  // 旧语义是切换：第二次点击会把面板收起来，用户看到「回到浮窗初始界面」（PLAN 036）
+  h.pipClick('appearance');
+  assert.equal(pip.barMode(), 'root', '连点 Aa 不收起面板');
+  assert.equal(h.pipButton('settings').style.display, '', '设置页仍然显示');
+  assert.equal(h.pipButton('stage').style.display, 'none', '字幕区仍然让位');
 
-  h.pipClick('reset');
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*color: #30D158/);
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 16\.2px/, '60% → 14.4 × 27/24');
-  assert.equal(h.saved.at(-1).llgPipAppearance.scale, 60, '复位也要落盘');
+  h.pipClick('page:modes');
+  assert.equal(pip.barMode(), 'modes');
+  h.pipClick('appearance');
+  assert.equal(pip.barMode(), 'modes', '子页上点 Aa 也不弹回首页');
+
+  h.pipClick('settings-close');
+  assert.equal(pip.barMode(), 'play', '收起只走面板自己的 ×');
 });
 
-test('桌面字幕：语言仍然跟随官方（换语言要换字面与字号比例）', async () => {
+test('桌面字幕：设置面板里的语言下拉写回官方，并换掉字体栈', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
   const pip = sandbox.__llgModPip;
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  await h.drain();
+  h.gesture();
   await h.drain();
 
   assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 27px/, '日语算 CJK：放大一档');
   assert.match(pip.pipCss(), /#line-primary \{[^}]*font-weight: 600/);
 
-  h.changeSettings(withAppearance({ learningLanguage: 'en' }));
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 24px/, '换成英语：不再放大');
-  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-weight: 500/);
-
-  // 只改样式时（浮窗不跟）样式表一字不改 —— 语言没变就不该白重画
-  const before = pip.pipCss();
-  h.changeSettings(withAppearance({ learningLanguage: 'en', subtitleScale: 150 }));
-  assert.equal(pip.pipCss(), before);
-});
-
-test('桌面字幕：落盘里的浮窗外观被写坏时逐项夹回合法值', async () => {
-  const { sandbox, h } = await harness({
-    withPip: true,
-    settings: APPEARANCE,
-    stored: {
-      llgPipAppearance: { style: 'nope', scale: 999, color: 'not-a-color', dual: 'yes' },
-    },
-  });
-  const pip = sandbox.__llgModPip;
+  h.pipClick('lang-menu:learningLanguage');
+  assert.equal(pip.barMode(), 'play', '语言菜单不算换页');
+  h.pipClick('lang:learningLanguage:en');
   await h.drain();
 
-  assert.deepEqual({ ...pip.appearanceOwn() },
-    { style: 'classic', scale: 150, color: '#FFFFFF', dual: true, ctxLines: pip.CTX_DEFAULT },
-    '逐项兜底，不是整份丢掉');
+  assert.equal(pip.official().learningLanguage, 'en');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-size: 24px/, '换成英语：不再放大');
+  assert.match(pip.pipCss(), /#line-primary \{[^}]*font-weight: 500/);
+  assert.equal(JSON.parse(h.syncWrites.at(-1)['linglass-settings']).state.learningLanguage, 'en');
+});
 
-  // 一半坏一半好：好的那项要保住（上下文行数不在落盘里 → 走默认 1）
-  assert.deepEqual({ ...pip.parseOwn({ style: 'cinema', scale: 'x' }) },
-    { style: 'cinema', scale: 100, color: '#FFFFFF', dual: true, ctxLines: 1 });
+test('桌面字幕：读音开关按语言给脚本，写回 readingMode', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  await h.drain();
+  h.gesture();
+  await h.drain();
 
-  // 上下文行数也要夹：负数 / 99 / 小数 / 字符串都不许原样进来
-  assert.equal(pip.parseOwn({ ctxLines: -5 }).ctxLines, 0);
-  assert.equal(pip.parseOwn({ ctxLines: 99 }).ctxLines, pip.CTX_MAX);
-  assert.equal(pip.parseOwn({ ctxLines: 1.4 }).ctxLines, 1);
-  assert.equal(pip.parseOwn({ ctxLines: '2' }).ctxLines, pip.CTX_DEFAULT, '字符串不当数字用');
+  assert.deepEqual([...pip.readingScriptsOf('ja')], ['kana', 'romaji', 'off']);
+  assert.deepEqual([...pip.readingScriptsOf('en')], [], '英语没有读音脚本');
+  assert.equal(pip.readingModeOf('ja', {}), 'kana', '没存过 → 取第一项');
 
-  // 整个值读不成 / 压根没存过（首次打开）→ null，交给调用方拿官方播种
-  assert.equal(pip.parseOwn(null), null);
-  assert.equal(pip.parseOwn(undefined), null);
-  assert.equal(pip.parseOwn('classic'), null);
+  // 官方口径（Ne / handleReadingToggle）：没存过时按第一项算「开着」，点一下才是关
+  h.pipClick('reading');
+  await h.drain();
+  assert.deepEqual({ ...pip.official().readingMode }, { ja: 'off' }, '点一下 = 关闭');
+
+  h.pipClick('reading:kana');
+  await h.drain();
+  assert.deepEqual({ ...pip.official().readingMode }, { ja: 'kana' });
+
+  h.pipClick('reading:romaji');
+  await h.drain();
+  assert.deepEqual({ ...pip.official().readingMode }, { ja: 'romaji' });
+
+  h.pipClick('reading');
+  await h.drain();
+  assert.deepEqual({ ...pip.official().readingMode }, { ja: 'off' });
 });
 
 test('桌面字幕：分隔符是独立节点，观感与视频内那套一致', async () => {
@@ -2765,9 +3428,41 @@ test('桌面字幕：分隔符是独立节点，观感与视频内那套一致',
   );
   assert.match(
     h.pipCss(),
-    /\.llg-sep \{ margin: 0 \.14em; opacity: \.42; font-weight: 400; \}/,
-    '分隔符吃的是 15-ja-break.js 视频内那套参数',
+    /\.llg-sep \{ margin: 0 \.16em; opacity: \.2; font-weight: 400; \}/,
+    '分隔符跟随 15-ja-break.js 的观感，PLAN 035 再压淡一档',
   );
+});
+
+test('桌面字幕：整片进度条跟着 duration 画，点/拖可以跳转', async () => {
+  const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE });
+  const pip = sandbox.__llgModPip;
+
+  h.currentTime = 5;
+  show(h, 'テスト', '测试');
+  await h.drain();
+  h.gesture();
+  await h.drain();
+
+  h.duration = 200;
+  h.currentTime = 50;
+  pip.pushTimeline();
+  assert.equal(h.pipButton('progress-fill').style.width, '25%', '50 / 200');
+  assert.equal(h.pipButton('progress').getAttribute('aria-valuenow'), '25');
+
+  assert.equal(pip.seekToFraction(0.5), true);
+  assert.equal(h.currentTime, 100);
+  assert.equal(h.pipButton('progress-fill').style.width, '50%', '跳完立刻重画');
+
+  assert.equal(pip.seekToFraction(2), true);
+  assert.equal(h.currentTime, 200, '超过 1 夹到结尾');
+  assert.equal(pip.seekToFraction(-1), true);
+  assert.equal(h.currentTime, 0, '负数夹到开头');
+
+  // 直播 / 时长未知：不猜，也不动 currentTime
+  h.currentTime = 30;
+  h.duration = 0;
+  assert.equal(pip.seekToFraction(0.5), false);
+  assert.equal(h.currentTime, 30);
 });
 
 test('桌面字幕：浮窗进度条按新的分母走', async () => {
@@ -2779,11 +3474,57 @@ test('桌面字幕：浮窗进度条按新的分母走', async () => {
 
   h.gesture();
   await h.drain();
-  assert.equal(h.pipFill(), '0%', '刚开窗时还没播');
+  assert.equal(h.pipFill(), 'scaleX(0)', '刚开窗时还没播');
 
   h.currentTime = 13;
   h.tick();
-  assert.equal(h.pipFill(), '50%', '3 / 6，而不是旧实现的 100%');
+  assert.equal(h.pipFill(), 'scaleX(0.5)', '3 / 6，而不是旧实现的 100%');
+});
+
+// ---------------------------------------------------------------- 手机字幕屏
+
+/**
+ * PLAN 046 §5：`castLines()` 的单槽缓存。
+ *
+ * 手机屏常开时它每秒被调 5~6 次（250ms 的 rAF + 1s 心跳 + track.subscribe），
+ * 而同一句的分词 / 注音分段结果完全一样。这里钉住「同句不重复切、换句必须重切」，
+ * 否则以后有人把缓存删掉也不会红。
+ */
+test('手机字幕屏：同一句重复取快照不重复分词', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+  const segment = sandbox.__llgModJaSegment;
+  assert.ok(pip && typeof pip.castLines === 'function', '浮窗要暴露 castLines');
+  assert.ok(segment && typeof segment.cut === 'function', '需要真实的 05-ja-segment.js');
+
+  h.jaBreakEnabled = true;
+  h.currentTime = 10;
+  show(h, '昨日買った本を読む', '昨天买的书');
+  await h.drain();
+
+  let cuts = 0;
+  const original = segment.cut;
+  segment.cut = function cut(...args) {
+    cuts += 1;
+    return original.apply(segment, args);
+  };
+
+  try {
+    const first = pip.castLines();
+    const afterFirst = cuts;
+    assert.ok(afterFirst > 0, '第一次要真的切分');
+
+    const second = pip.castLines();
+    assert.equal(cuts, afterFirst, '同一句第二次不许再切');
+    assert.equal(second, first, '同一次快照复用的是同一个对象');
+
+    show(h, '今日は晴れです', '今天晴');
+    await h.drain();
+    pip.castLines();
+    assert.ok(cuts > afterFirst, '原文变了必须重新切分');
+  } finally {
+    segment.cut = original;
+  }
 });
 
 // ---------------------------------------------------------------- 浮窗的上下文行
@@ -2810,9 +3551,9 @@ test('桌面字幕：默认只显示下一句，且下一句只有原文（译�
     '官方缓存里没有译文 —— 这句还没被播到过');
   assert.equal(h.pipButton('prev').style.display, 'none', '档位 1 时上一句要收起来');
 
-  // 上下文行：字号 0.8×、不透明度 55%，且不给底板 / 不给注音
-  assert.match(h.pipCss(), /#next-primary \{[^}]*font-size: 21\.6px/, '27 × 0.8');
-  assert.match(h.pipCss(), /#next-secondary \{[^}]*font-size: 16px/, '20 × 0.8');
+  // 上下文行：字号 0.7×、整段 40% 不透明，且不给底板 / 不给注音（PLAN 035 把 0.8 压到 0.7）
+  assert.match(h.pipCss(), /#next-primary \{[^}]*font-size: 18\.9px/, '27 × 0.7');
+  assert.match(h.pipCss(), /#next-secondary \{[^}]*font-size: 14px/, '20 × 0.7');
   // 「淡」在块上（整段一起淡），只有当前句不透明；悬停提亮一档，明示点得动
   assert.match(h.pipCss(), /\.ctx \{[^}]*opacity: \.4/, '上下文行整段压到 .4');
   assert.match(h.pipCss(), /\.ctx:hover \{ opacity: \.75; \}/);
@@ -2862,7 +3603,7 @@ test('桌面字幕：档位拉到 2 时上一句也显示，并带上它刚采�
   assert.equal(pip.contextText(-99), null);
 });
 
-test('桌面字幕：≡ 循环 0/1/2 并落盘，0 时两段上下文都收起来', async () => {
+test('桌面字幕：上下文行循环 0/1/2 并落盘，0 时两段都收起来', async () => {
   const { sandbox, h } = await harness({ withPip: true, settings: APPEARANCE, stored: officialCache(SKELETON_CUES) });
   const pip = sandbox.__llgModPip;
   h.jaBreakEnabled = false;
@@ -2878,31 +3619,29 @@ test('桌面字幕：≡ 循环 0/1/2 并落盘，0 时两段上下文都收起�
   h.gesture();
   await h.drain();
 
-  assert.equal(pip.appearanceOwn().ctxLines, pip.CTX_DEFAULT, '默认 1：只看下一句');
-  assert.equal(h.pipButton('pip-ctx').textContent, '≡1', '按钮上要写档位');
-  assert.equal(h.pipButton('pip-ctx').dataset.on, '1', '开了上下文才算选中态');
+  assert.equal(pip.pipOption().ctxLines, pip.CTX_DEFAULT, '默认 1：只看下一句');
 
   h.pipClick('ctx'); // 1 → 2
-  assert.equal(pip.appearanceOwn().ctxLines, 2);
-  assert.equal(h.pipButton('pip-ctx').textContent, '≡2');
+  assert.equal(pip.pipOption().ctxLines, 2);
   assert.equal(h.pipButton('prev').style.display, '', '2 段：上一句要出来');
   assert.equal(h.saved.at(-1).llgPipAppearance.ctxLines, 2, '改一下就要落盘');
-
-  // ↺ 复位只把官方那套请回来，不该顺手抹掉用户调的行数
-  h.pipClick('reset');
-  assert.equal(pip.appearanceOwn().ctxLines, 2, '复位不动上下文行数');
+  assert.deepEqual(Object.keys(h.saved.at(-1).llgPipAppearance), ['ctxLines'],
+    '浮窗这一份只存 ctxLines，不再存外观');
 
   h.pipClick('ctx'); // 2 → 0
-  assert.equal(pip.appearanceOwn().ctxLines, 0);
-  assert.equal(h.pipButton('pip-ctx').textContent, '≡0');
-  assert.equal(h.pipButton('pip-ctx').dataset.on, undefined, '0 不算选中');
+  assert.equal(pip.pipOption().ctxLines, 0);
   assert.equal(h.pipButton('prev').style.display, 'none');
   assert.equal(h.pipButton('next').style.display, 'none', '0 段时下一句也要收起来');
   assert.equal(h.pipLineText('next-primary'), '', '收起时要清掉文本');
 
   h.pipClick('ctx'); // 0 → 1
-  assert.equal(pip.appearanceOwn().ctxLines, 1);
+  assert.equal(pip.pipOption().ctxLines, 1);
   assert.equal(h.saved.at(-1).llgPipAppearance.ctxLines, 1);
+
+  // 外观改动不该顺手把 ctxLines 抹掉
+  h.pipClick('scale+');
+  await h.drain();
+  assert.equal(pip.pipOption().ctxLines, 1);
 });
 
 test('桌面字幕：换句时给滚轮动效打方向标记，改外观不滚', async () => {
@@ -2936,7 +3675,7 @@ test('桌面字幕：换句时给滚轮动效打方向标记，改外观不滚',
   assert.equal(reel.dataset.roll, 'down', '后退 = 从上往下推');
 
   // 改外观（不换句）不该滚：方向标记保持原样，不重新触发
-  pip.setAppearanceOwn({ color: '#FFD60A' });
+  pip.patchOfficial({ subtitleColor: '#FFD60A' });
   assert.equal(reel.dataset.roll, 'down', '只改颜色 → 不动效');
 
   // 同一个方向连续换句也要能重放：标记被删掉再打回来（动画名不会自己重来）

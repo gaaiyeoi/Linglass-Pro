@@ -36,8 +36,18 @@ const SITE_MATCHES = ['https://www.youtube.com/*'];
 /** 开发构建里 dev server 的地址（127.0.0.1 属安全上下文，https 页面也能连） */
 const DEV_ORIGIN = 'http://127.0.0.1:8791/*';
 
-/** 文件名以它结尾的脚本只作为 Service Worker 模块，绝不作内容脚本 */
+/** 手机字幕屏要连的本机端口（match pattern 不含端口，一条就够） */
+const CAST_ORIGIN = 'http://127.0.0.1/*';
+
+/**
+ * Service Worker 模块的两个后缀：
+ *   .sw.dev.js  只在 --dev 构建挂上去（开发期自动重载）
+ *   .sw.js      正式构建也挂（PLAN 038 手机字幕屏的转发必须走 SW：
+ *               扩展源 + host_permissions 才不受页面侧的跨域/私有网络策略影响）
+ * 两者都**绝不**作为内容脚本注入。
+ */
 const SW_MODULE_SUFFIX = '.sw.dev.js';
+const SW_PROD_SUFFIX = '.sw.js';
 
 /**
  * mod 依赖 Linglass 的 Shadow DOM 契约，官方改版时这里会失效。
@@ -137,7 +147,7 @@ async function scanMod() {
       const isDevOnly = entry.name.endsWith('.dev.js');
       if (isDevOnly && !DEV) continue;
 
-      if (entry.name.endsWith(SW_MODULE_SUFFIX)) {
+      if (entry.name.endsWith(SW_MODULE_SUFFIX) || entry.name.endsWith(SW_PROD_SUFFIX)) {
         swModules.push(rel);
       } else {
         contentScripts.push(rel);
@@ -208,12 +218,21 @@ async function main() {
     });
   }
 
-  if (DEV) {
-    if (!mf.host_permissions.includes(DEV_ORIGIN)) {
-      mf.host_permissions.push(DEV_ORIGIN);
-    }
-    await patchServiceWorker(swModules);
+  // 手机字幕屏（PLAN 038 / 046）：SW 里 fetch 本机中转站需要这条权限。
+  // 放 **optional_host_permissions**：不用手机屏的人不该在安装扩展时就被要求
+  // 「读取 127.0.0.1」。用户在打开开关时（用户手势内）才申请，见 35-cast.js
+  // 的 requestCastPermission()；没授权时直连那条路仍然可用，SW 只是兜底。
+  if (!Array.isArray(mf.optional_host_permissions)) mf.optional_host_permissions = [];
+  if (!mf.optional_host_permissions.includes(CAST_ORIGIN)) {
+    mf.optional_host_permissions.push(CAST_ORIGIN);
   }
+
+  if (DEV && !mf.host_permissions.includes(DEV_ORIGIN)) {
+    mf.host_permissions.push(DEV_ORIGIN);
+  }
+
+  // SW 模块不再只在 dev 构建里挂：正式版也要（目前只有手机字幕屏的转发）
+  await patchServiceWorker(swModules);
 
   const [maj, min] = mf.version.split('.').map(Number);
   mf.version = `${maj}.${min}.${MOD_PATCH}`;
@@ -235,7 +254,9 @@ async function main() {
   }
 
   // SW 模块绝不能被当成内容脚本注入（内容脚本没有 chrome.runtime.reload）
-  const leakedSw = injectedJs.filter((js) => js.endsWith(SW_MODULE_SUFFIX));
+  const leakedSw = injectedJs.filter(
+    (js) => js.endsWith(SW_MODULE_SUFFIX) || js.endsWith(SW_PROD_SUFFIX),
+  );
   if (leakedSw.length) {
     throw new Error(`SW 模块被误注入为内容脚本: ${leakedSw.join(', ')}`);
   }

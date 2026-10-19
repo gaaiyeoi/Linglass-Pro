@@ -29,6 +29,7 @@
    */
   const STALE_IDS = [
     'llg-pip-btn',
+    'llg-cast-btn',
     'llg-panel-btn',
     'llg-mod-control-styles',
     'llg-pip-btn-styles', // 早期版本的样式 id，一并清掉

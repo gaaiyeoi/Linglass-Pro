@@ -675,6 +675,27 @@ const PIP_PROBE = `(() => {
   };
 })()`;
 
+/**
+ * 画中画存活采样（PLAN 032）。
+ *
+ * 与 PIP_PROBE 分开：PIP_PROBE 的口径被「实测④」钉着，这里只关心
+ * 「窗口还在不在」以及**同一时刻**宿主页面的可见性/焦点 —— 三者的组合才能判断
+ * 是「切标签页」、「切应用」还是「回到 opener」触发了收走。
+ */
+const PIP_ALIVE_PROBE = `(() => {
+  const apiPresent = 'documentPictureInPicture' in window;
+  const w = apiPresent ? documentPictureInPicture.window : undefined;
+  const btn = document.getElementById('llg-pip-btn');
+  return {
+    apiPresent,
+    windowOpen: !!w,
+    closed: w ? !!w.closed : null,
+    visibility: document.visibilityState,
+    hasFocus: typeof document.hasFocus === 'function' ? document.hasFocus() : null,
+    buttonOn: btn ? btn.classList.contains('is-on') : null,
+  };
+})()`;
+
 /** 扩展 isolated world 里才有的东西 */
 const STORAGE_PROBE = `(async () => {
   const grab = async (area) => {
@@ -838,6 +859,170 @@ async function dragShadowHandle(cdp, sessionId, hostId, selector, dx) {
     sessionId,
   );
   return true;
+}
+
+// ------------------------------------------------- 画中画存活实测（PLAN 032）
+//
+// 要回答的是「浮窗到底在哪个时刻丢的」：切标签页？切应用？还是切回浏览器。
+// 三段实测都只是**采样**，不改任何产品代码 —— 结论决定后面走「优化重开时机」还是「原生 helper」。
+
+/** 打印一行采样（中文不 padEnd：中文字符的显示宽度不是 1，按长度对齐反而更歪） */
+function printPipSample(phase, elapsed, sample) {
+  console.log(`[probe] ${phase} +${String(elapsed).padStart(4)}ms  `
+    + `窗口=${sample.windowOpen ? '在' : '没了'}  `
+    + `可见=${sample.visibility}  焦点=${sample.hasFocus}  `
+    + `按钮=${sample.buttonOn ? 'on' : 'off'}`);
+}
+
+/**
+ * 按 gaps（距上一次采样的毫秒数）连续采样。
+ * 返回最后一次采样与「第一次发现窗口没了」的时刻 —— 立刻没与延迟几秒没，含义完全不同。
+ */
+async function pipTimeline(cdp, sessionId, phase, gaps) {
+  let elapsed = 0;
+  let lostAt = null;
+  let last = null;
+  for (const gap of gaps) {
+    if (gap) await sleep(gap);
+    elapsed += gap;
+    const sample = await evaluate(cdp, sessionId, PIP_ALIVE_PROBE);
+    last = sample;
+    if (lostAt === null && !sample.windowOpen) lostAt = elapsed;
+    printPipSample(phase, elapsed, sample);
+  }
+  return { last, lostAt };
+}
+
+/** 一句结论：只在「切走」与「切回」两段各取最后一份采样，避免把中间态读成结论 */
+function printPipVerdict(name, away, back) {
+  if (!away || !back) return;
+  const awayAlive = Boolean(away.last && away.last.windowOpen);
+  const backAlive = Boolean(back.last && back.last.windowOpen);
+  if (!awayAlive) {
+    console.log(`[probe] 结论(${name})：切走时就被收走`
+      + `${away.lostAt === null ? '' : `（+${away.lostAt}ms）`}`);
+    return;
+  }
+  if (!backAlive) {
+    console.log(`[probe] 结论(${name})：切走时还在，切回来被收走`
+      + `${back.lostAt === null ? '' : `（+${back.lostAt}ms）`}`);
+    return;
+  }
+  console.log(`[probe] 结论(${name})：切走与切回都还在`);
+}
+
+/**
+ * 切到同一浏览器的另一个标签页再切回来。
+ *
+ * 用 CDP 而不是键盘快捷键：Arc 上快捷键会被它自己吃掉。
+ * `Target.createTarget` 在 Arc 里会被立刻搬走（见 pickPage 上方注释），失败就跳过 ——
+ * 这一段的失败不该连累「切应用」那一段。
+ */
+async function pipTabSwitch(cdp, sessionId, pageTarget) {
+  let other = null;
+  try {
+    const created = await cdp.send('Target.createTarget', { url: 'about:blank', background: false });
+    other = created.targetId;
+  } catch (err) {
+    console.log(`[probe] 当前浏览器不允许新建标签页（${err.message}），跳过切标签页实测`);
+    return null;
+  }
+
+  try {
+    await sleep(900);
+    const away = await pipTimeline(cdp, sessionId, '切走(新标签页)', [600, 2400]);
+    try {
+      await cdp.send('Target.activateTarget', { targetId: pageTarget.targetId });
+    } catch (err) {
+      console.log(`[probe] Target.activateTarget 不可用（${err.message}），改用 Page.bringToFront`);
+      await cdp.send('Page.bringToFront', {}, sessionId);
+    }
+    const back = await pipTimeline(cdp, sessionId, '切回(原标签页)', [400, 1000, 2500]);
+    printPipVerdict('标签页', away, back);
+    return { away, back };
+  } finally {
+    if (other) {
+      await cdp.send('Target.closeTarget', { targetId: other }).catch(() => {});
+    }
+  }
+}
+
+/** 从可执行文件路径截出 .app（`/Applications/Arc.app/Contents/MacOS/Arc` → `/Applications/Arc.app`） */
+function appBundlePath(bin) {
+  const index = String(bin).indexOf('.app/');
+  return index === -1 ? null : String(bin).slice(0, index + 4);
+}
+
+/** `open -a`：不触发「自动化」权限弹窗（AppleScript 控制别的 app 会） */
+function activateApp(appPath) {
+  try {
+    execFileSync('open', ['-a', appPath], { stdio: 'ignore' });
+    return true;
+  } catch (err) {
+    console.log(`[probe] open -a ${path.basename(appPath)} 失败：${err.message}`);
+    return false;
+  }
+}
+
+/** 切到别的应用再切回来 —— 这才是用户真正要验证的那个动作 */
+async function pipAppSwitch(cdp, sessionId, browserBin) {
+  if (process.platform !== 'darwin') {
+    console.log('[probe] 非 macOS：跳过「切到别的应用」实测');
+    return null;
+  }
+  const app = appBundlePath(browserBin);
+  if (!app) {
+    console.log('[probe] 无法从浏览器路径推出 .app，跳过「切到别的应用」实测');
+    return null;
+  }
+
+  console.log(`[probe] 切走 → Finder，切回 → ${path.basename(app)}`);
+  if (!activateApp('Finder')) return null;
+  const away = await pipTimeline(cdp, sessionId, '切走(Finder)', [700, 2500]);
+
+  if (!activateApp(app)) return { away, back: null };
+  const back = await pipTimeline(cdp, sessionId, '切回(浏览器)', [400, 1200, 2500]);
+  printPipVerdict('应用', away, back);
+  return { away, back };
+}
+
+/**
+ * 窗口丢了之后，一次**真实**页面点击能不能把它接回来。
+ *
+ * 点的是播放器左上角：YouTube 会顺带切换播放/暂停（探针可接受），
+ * 但那次 pointerdown 是真实手势，会命中 `arm()` 的一次性监听。
+ */
+async function restorePipByClick(cdp, sessionId) {
+  const before = await evaluate(cdp, sessionId, PIP_ALIVE_PROBE);
+  if (before.windowOpen) return before;
+
+  const box = await evaluate(cdp, sessionId, `(() => {
+    const el = document.querySelector('#movie_player');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: Math.round(r.left + 30), y: Math.round(r.top + 30) };
+  })()`);
+  if (!box) {
+    console.log('[probe] 找不到播放器，无法验证「手势重开」');
+    return before;
+  }
+
+  console.log('[probe] 窗口已不在，点一下播放器（会顺带切换播放/暂停）验证手势重开');
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y }, sessionId);
+  await cdp.send(
+    'Input.dispatchMouseEvent',
+    { type: 'mousePressed', x: box.x, y: box.y, button: 'left', buttons: 1, clickCount: 1 },
+    sessionId,
+  );
+  await sleep(60);
+  await cdp.send(
+    'Input.dispatchMouseEvent',
+    { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', buttons: 0, clickCount: 1 },
+    sessionId,
+  );
+  const timeline = await pipTimeline(cdp, sessionId, '手势后', [1200, 2000]);
+  console.log(`[probe] 结论(手势重开)：${timeline.last && timeline.last.windowOpen ? '成功' : '失败'}`);
+  return timeline.last;
 }
 
 /**
@@ -1182,6 +1367,31 @@ async function main() {
         await sleep(1500);
         const restored = await evaluate(cdp, sessionId, PIP_PROBE);
         console.log(`[probe] 恢复后:   ${JSON.stringify(restored)}`);
+
+        // ---------------------------------------------------- 存活实测（PLAN 032）
+        // ⑤ 之后窗口可能已经被收走（那正是它要测的），先确认它还开着：⑥⑦ 测的是
+        // 「切走时会不会丢」，没有窗口就无物可测。
+        rule('实测⑥：切到另一个标签页 / 切回来，浮窗还在不在');
+        let alive = await evaluate(cdp, sessionId, PIP_ALIVE_PROBE);
+        if (!alive.windowOpen) {
+          console.log('[probe] 上一步之后窗口已不在，点一次控制栏按钮重开再继续');
+          await sleep(1200);
+          await clickSelector(cdp, sessionId, '#llg-pip-btn');
+          await sleep(2000);
+          alive = await evaluate(cdp, sessionId, PIP_ALIVE_PROBE);
+        }
+
+        if (alive.windowOpen) {
+          await pipTabSwitch(cdp, sessionId, pageTarget);
+
+          rule('实测⑦：切到别的应用 / 切回来，浮窗还在不在');
+          await pipAppSwitch(cdp, sessionId, browser);
+
+          rule('实测⑧：窗口丢了之后，一次真实页面点击能否重开');
+          await restorePipByClick(cdp, sessionId);
+        } else {
+          console.log('[probe] 窗口仍然不在（按钮重开也失败），跳过 ⑥⑦⑧');
+        }
       } else if (!HEADED) {
         console.log('[probe] headless 拿不到画中画窗口（没有窗口管理器），用 --headed 重跑才能验证');
       }

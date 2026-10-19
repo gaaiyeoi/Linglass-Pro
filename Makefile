@@ -18,13 +18,15 @@ DIST     := dist
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test probe dev open package check vendor-update vendor-from clean
+.PHONY: help build test probe dev cast cast-demo open package check vendor-update vendor-from clean
 
 help:
 	@echo "make build                        构建 dist/（正式版）"
 	@echo "make test                         跑契约测试与逻辑冒烟测试"
 	@echo "make probe                        开一个带扩展的浏览器实测（弹窗，跑完保留窗口）"
 	@echo "make dev                          监听 src/ 自动重建 + 自动重载（开发用）"
+	@echo "make cast                         启动手机字幕屏（局域网中转，8899）"
+	@echo "make cast-demo                    同上，但用假字幕预览手机端排版"
 	@echo "make open                         打开已装浏览器的扩展管理页"
 	@echo "make package                      打「一键安装包」到 release/"
 	@echo "make check                        检查 dist/ 是否已正确注入 mod 脚本"
@@ -45,6 +47,14 @@ probe:
 
 dev:
 	node tools/dev.mjs
+
+# 手机字幕屏（PLAN 035）：手机与 Mac 要在同一个 Wi-Fi，手机浏览器打开终端里打印的地址。
+# cast-demo 用假字幕，目的是先确认手机端排版；真字幕等扩展侧 sender 接上才有。
+cast:
+	node tools/cast-server.mjs
+
+cast-demo:
+	node tools/cast-server.mjs --demo
 
 open:
 	@for spec in "Google Chrome|chrome://extensions" "Arc|arc://extensions" \

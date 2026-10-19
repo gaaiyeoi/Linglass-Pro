@@ -40,8 +40,8 @@ const LINGLASS_CONTRACT = [
   {
     probe: 'linglass-subtitle-overlay',
     selector: null,
-    where: '10-subtitle-track.js HOST_ID',
-    note: '字幕浮层宿主 id，读取字幕的唯一入口',
+    where: '10-subtitle-track.js HOST_ID / 12-longline.js CSS',
+    note: '字幕浮层宿主 id，读取字幕的唯一入口；12-longline 也按它找 shadowRoot 并放宽宽度',
   },
   {
     probe: 'subtitle-group',
@@ -60,6 +60,18 @@ const LINGLASS_CONTRACT = [
     selector: '.subtitle.subtitle-secondary',
     where: '10-subtitle-track.js readLines()',
     note: '译文行',
+  },
+  {
+    probe: 'linglass-subtitle-primary',
+    selector: null,
+    where: '12-longline.js CSS',
+    note: '原文行 class：max-width 放宽、日文禁则、均衡折行都挂在这个类上（写在模板字符串里，漏登记检测扫不到）',
+  },
+  {
+    probe: 'linglass-subtitle-secondary',
+    selector: null,
+    where: '12-longline.js CSS',
+    note: '译文行 class：与原文行同一组排版规则',
   },
   {
     probe: 'linglass-word',
@@ -219,6 +231,171 @@ const LINGLASS_CONTRACT = [
     selector: null,
     where: '30-desktop-subtitles.js STYLE_SPECS',
     note: '官方样式预设里的译文行透明度系数（classic 是 .75）',
+  },
+  // 浮窗设置面板（PLAN 033）：整套 class 名与官方设置面板一一对应，样式表在开窗时
+  // 从官方 shadowRoot 的 <style> 整份拷过来。下面任何一条消失，浮窗面板都会「能点但难看」。
+  {
+    probe: 'settings-panel',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '面板外壳（官方 270px 宽、带主题底色的那个）',
+  },
+  {
+    probe: 'panel-header',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '面板头部（品牌区 / 返回 / 关闭）',
+  },
+  {
+    probe: 'header-title',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '头部标题',
+  },
+  {
+    probe: 'panel-back__title',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '子页返回按钮上的页名',
+  },
+  {
+    probe: 'panel-stack',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '分页栈；官方由 JS 设高度，我们在覆盖规则里改成自适应',
+  },
+  {
+    probe: 'style-row__head',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '「样式」小节标题行',
+  },
+  {
+    probe: 'style-btn__art',
+    selector: null,
+    where: '30-desktop-subtitles.js buildStyleGrid()',
+    note: '预设瓷砖的图案块（选中环画在它上面）',
+  },
+  {
+    probe: 'appearance-controls',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '字号 + 色板那一行',
+  },
+  {
+    probe: 'font-controls',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: 'A− / A+ 分段按钮',
+  },
+  {
+    probe: 'color-btn',
+    selector: null,
+    where: '30-desktop-subtitles.js buildColorPalette()',
+    note: '色板圆点（选中态是白圈 + 蓝环）',
+  },
+  {
+    probe: 'lang-pair',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '学习语言 → 母语那一行',
+  },
+  {
+    probe: 'lang-trigger',
+    selector: null,
+    where: '30-desktop-subtitles.js buildLangDropdown()',
+    note: '语言下拉的触发器',
+  },
+  {
+    probe: 'lang-option',
+    selector: null,
+    where: '30-desktop-subtitles.js buildLangDropdown()',
+    note: '语言下拉的选项行',
+  },
+  {
+    probe: 'lang-flag',
+    selector: null,
+    where: '30-desktop-subtitles.js buildLangDropdown()',
+    note: '语言前的国旗位',
+  },
+  {
+    probe: 'lang-chevron',
+    selector: null,
+    where: '30-desktop-subtitles.js buildLangDropdown()',
+    note: '语言下拉的小箭头',
+  },
+  {
+    probe: 'segmented-option',
+    selector: null,
+    where: '30-desktop-subtitles.js syncReadingScripts()',
+    note: '读音脚本分段控件',
+  },
+  {
+    probe: 'reading-script-row',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '读音脚本那一行（语言没有脚本时整行隐藏）',
+  },
+  {
+    probe: 'mode-cap',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '观看模式的说明行',
+  },
+  {
+    probe: 'mode-params',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '观看模式的参数行容器',
+  },
+  {
+    probe: 'mode-row__name',
+    selector: null,
+    where: '30-desktop-subtitles.js syncModeParams()',
+    note: '参数行标题（暂停位置 / 重复次数 …）',
+  },
+  {
+    probe: 'mode-row__val',
+    selector: null,
+    where: '30-desktop-subtitles.js syncModeParams()',
+    note: '参数行当前值（点击循环）',
+  },
+  {
+    probe: 'mode-row__cyc',
+    selector: null,
+    where: '30-desktop-subtitles.js syncModeParams()',
+    note: '参数行的循环箭头',
+  },
+  {
+    probe: 'mode-toggles',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '观看模式页底部的两个开关（翻译时暂停 / 视频上的提示）',
+  },
+  // 官方设置字段（面板要读写的其余几项）
+  {
+    probe: 'readingMode',
+    selector: null,
+    where: '30-desktop-subtitles.js parseSettings() / selectReading()',
+    note: '读音脚本：按语言短码存脚本名，缺失时官方按第一项算「开着」',
+  },
+  {
+    probe: 'mediaCaptureEnabled',
+    selector: null,
+    where: '30-desktop-subtitles.js buildSettingsPanel()',
+    note: '「配图」开关（YouTube 门控）',
+  },
+  {
+    probe: 'viewing',
+    selector: null,
+    where: '30-desktop-subtitles.js normalizeViewing()',
+    note: '观看模式对象：mode / pause / repeat / listen / pauseOnTranslate / showHints',
+  },
+  {
+    probe: 'fontSize',
+    selector: null,
+    where: '30-desktop-subtitles.js fontSizeFromScale()',
+    note: '官方从 subtitleScale 派生的字号字段，写回时必须一起带',
   },
 ];
 
