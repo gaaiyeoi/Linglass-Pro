@@ -2,11 +2,12 @@
 
 在 [Linglass](https://chromewebstore.google.com/detail/nhncklckpmkkhjcijjgfcgclfpbbkcba)（YouTube 双语字幕扩展）之上做**增量改造**：官方代码一个字节都不改，构建时叠加成一个新扩展。
 
-![三大功能总览](docs/images/overview.svg)
+![功能总览](docs/images/overview.svg)
 
 | 功能 | 一句话说明 | 默认 |
 | --- | --- | --- |
 | 🖥️ 桌面字幕浮窗 | 把字幕投到系统级画中画窗口，最小化浏览器也看得见 | 关闭，手动点开 |
+| 📱 手机字幕屏 | 同一 Wi-Fi 下用手机全屏看字幕，不用凑在电脑前 | 关闭，点按钮开 |
 | 📋 学习面板 | 侧栏显示整条字幕，点句跳转，能导出 Markdown / SRT | 常驻 |
 | ✂️ 句内断句 | 日语字幕按「文节」断开，方便跟读 | 跟随设置 |
 | 🤖 AI 翻译 | 填自己的 API Key，按句翻译原文，结果直接进面板/浮窗/导出 | 关闭，按需开 |
@@ -27,6 +28,30 @@
 - **开了就一直开着**：点浮窗自己的 `×`、刷新页面、换视频都会自动重开；只有设置面板的开关能真正关掉它。
 - 播到哪一句，译文才会出现在哪一句（官方不缓存整条译文），这是官方数据本身的限制。
 - 更多细节（进度驱动方式、窗口尺寸规则、注音跟随逻辑）见下方「已知限制」。
+
+## 📱 手机字幕屏
+
+![手机字幕屏：Mac 推给局域网中转，中转再用 SSE 发给手机](docs/images/cast.svg)
+
+把正在播的这一句同步到手机上，手机全屏看字幕，不用凑在电脑前。
+
+```bash
+make cast        # 启动局域网中转（默认 8899），终端会打印手机要打开的地址
+make cast-demo   # 没有视频时用假字幕预览手机端排版
+```
+
+1. 手机与 Mac 连**同一个 Wi-Fi**，用手机浏览器打开终端里那一行
+   `http://192.168.x.x:8899/?room=demo`（或 `http://<主机名>.local:8899/?room=demo`）。
+   首次运行要在 macOS 的防火墙弹窗里点「允许」。
+2. 在 YouTube 播放页点控制栏的 **手机字幕屏** 按钮；它变成「关闭手机字幕屏」即开始推送。
+   设置面板的 `Linglass-Pro` 分组里也有同一个开关，以及一行「测试手机字幕屏连接」。
+3. 手机上的排版与浮窗同一套：上一句 / 当前句 / 下一句、文节分隔、注音、双语、整片进度条。
+   点画面会浮出 `⚙`，可以改样式 / 字号 / 颜色 / 双语 / 上下文 / 进度条；
+   「分享 → 添加到主屏幕」之后从图标打开就没有地址栏（iOS 只有 standalone 模式能全屏）。
+
+- 推送走 SSE（服务端 → 手机），手机断线会自动重连；Mac 那边暂停且字幕没变时不会重复发。
+- 房间号（`?room=`）只用于隔离多台手机 / 多个标签，**不做鉴权**：同一 Wi-Fi 上打开这个地址的人都能看到字幕。
+- 换端口：`PORT=9000 node tools/cast-server.mjs`，扩展侧的 `endpoint` 也要跟着改（`__llgModCast.setConfig`）。
 
 ## 📋 学习面板
 
@@ -101,6 +126,8 @@ make open            # 打开浏览器扩展管理页
 | `make test` | 跑契约测试与逻辑冒烟测试 |
 | `make check` | 自检 `dist/` 是否已正确注入 |
 | `make probe` | 开一个带扩展的浏览器做实测 |
+| `make cast` | 启动手机字幕屏的局域网中转（默认 8899） |
+| `make cast-demo` | 同上，但用假字幕预览手机端排版 |
 | `make open` | 打开扩展管理页 |
 | `make package` | 打两个包到 `release/` |
 | `make vendor-update` | 拉取官方最新版作为基线并重新构建 |
@@ -125,6 +152,8 @@ make open            # 打开浏览器扩展管理页
 | `10-subtitle-track.js` | 字幕轨道记录器 |
 | `15-ja-break.js` | 字幕句内断句 |
 | `30-desktop-subtitles.js` | 桌面字幕浮窗 |
+| `35-cast.js` | 手机字幕屏的发送端（控制栏按钮 + 推送） |
+| `35-cast.sw.js` | Service Worker 侧的转发（只挂 SW，绝不当内容脚本） |
 | `40-study-panel.js` | 学习面板 |
 | `50-settings-panel.js` | 挂进 Linglass 自己的设置面板 |
 
@@ -147,6 +176,8 @@ make open            # 打开浏览器扩展管理页
 - 注音（振假名）只在浮窗跟随官方显示，面板与导出文件不含注音。
 - 浮窗高度随内容定，字号变化不会自动重算窗口大小，拖一下即可。
 - 词级时间戳拿不到（官方不暴露内部 cue 时间轴），词内进度是线性插值近似。
+- 手机字幕屏要在 Mac 上跑 `make cast`，只传字幕、不传画面与声音；Mac 页面关掉就没有内容了。
+- 手机字幕屏走局域网 HTTP，没有鉴权：同一 Wi-Fi 上知道地址的人都能看。
 - 「免 Node 的干净包」做不到：安装器版要先装 Node；完整版自带官方代码。取舍见 [`docs/plans/023-one-click-installer.md`](docs/plans/023-one-click-installer.md)。
 - 官方发新版不会自动同步，需要重新跑一次安装流程。
 
@@ -162,7 +193,7 @@ Linglass-Pro/
 │   ├── install-guide.html  图文安装向导
 │   └── plans/NNN-*.md      一个需求一份 PLAN
 ├── src/mod/                我们的全部代码
-├── tools/                  dev / import-vendor / install / package / probe / zip / test
+├── tools/                  dev / import-vendor / install / package / probe / cast-server / cast-page / zip / test
 ├── vendor/                 官方基线（只读，不进版本控制）
 ├── release/                安装包产物（不进版本控制）
 └── dist/                   构建产物（不进版本控制）

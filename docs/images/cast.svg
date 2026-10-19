@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img"
+     aria-label="手机字幕屏示意：Mac 上的扩展把当前字幕推给本机 8899 端口的局域网中转，中转再用 SSE 发给同一 Wi-Fi 下的手机；手机上显示与浮窗同款的三段字幕与整片进度条">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#8b949e"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+           "Noto Sans CJK SC", system-ui, sans-serif; }
+    .t    { font-size: 15px; font-weight: 600; fill: #1f2328; }
+    .note { font-size: 12.5px; fill: #57606a; }
+    .tip  { font-size: 11.5px; fill: #7f8c9b; }
+    .card { fill: #ffffff; stroke: #d8dee4; stroke-width: 1.5; }
+    .head { fill: #f6f8fa; }
+    .dark { fill: #141518; stroke: #2c313a; stroke-width: 1.5; }
+    .btn  { fill: #23272e; stroke: #333941; stroke-width: 1.2; }
+    .on   { fill: #1b3a5c; stroke: #3d7ebf; stroke-width: 1.4; }
+    .bt   { font-size: 10.5px; fill: #c9d1d9; }
+    .bton { font-size: 10.5px; fill: #cfe4ff; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="429" rx="16" fill="#ffffff" stroke="#e4e8ec"/>
+
+  <text class="t" x="30" y="44">手机字幕屏：同一 Wi-Fi 下，把当前这句送到手机上</text>
+  <text class="note" x="430" y="44">—— 中转只在 Mac 上跑一小段本地进程，不经过任何云服务</text>
+
+  <!-- Mac 一侧 -->
+  <rect class="card" x="40" y="70" width="330" height="250" rx="12"/>
+  <rect class="head" x="40" y="70" width="330" height="34" rx="12"/>
+  <rect class="head" x="40" y="90" width="330" height="14"/>
+  <circle cx="58" cy="87" r="3.5" fill="#ff5f56"/>
+  <circle cx="70" cy="87" r="3.5" fill="#ffbd2e"/>
+  <circle cx="82" cy="87" r="3.5" fill="#27c93f"/>
+  <text class="tip" x="200" y="91" text-anchor="middle">YouTube 播放页 · Mac</text>
+  <line x1="40" y1="104" x2="370" y2="104" stroke="#e4e8ec"/>
+
+  <rect class="dark" x="56" y="118" width="298" height="150" rx="10"/>
+  <text x="72" y="146" font-size="13" fill="#e8eaed" opacity="0.6">あさ ごはんを 食べた</text>
+  <text x="72" y="176" font-size="17" fill="#e8eaed">昨日 買った 本を 読む</text>
+  <text x="72" y="196" font-size="11.5" fill="#aab4c2">读昨天买的书。</text>
+  <rect x="72" y="216" width="266" height="3" rx="1.5" fill="#2b3038"/>
+  <rect x="72" y="216" width="96" height="3" rx="1.5" fill="#ffffff"/>
+  <rect class="on" x="72" y="230" width="96" height="24" rx="6"/>
+  <text class="bton" x="120" y="246" text-anchor="middle">手机字幕屏</text>
+  <rect class="btn" x="176" y="230" width="60" height="24" rx="6"/>
+  <text class="bt" x="206" y="246" text-anchor="middle">播放 / 暂停</text>
+  <rect class="btn" x="244" y="230" width="46" height="24" rx="6"/>
+  <text class="bt" x="267" y="246" text-anchor="middle">Aa</text>
+  <text class="tip" x="56" y="292">控制栏按钮变成「关闭手机字幕屏」即开始推送；</text>
+  <text class="tip" x="56" y="308">设置面板的 Linglass-Pro 分组里也有同一个开关。</text>
+
+  <!-- 中转 -->
+  <rect class="card" x="400" y="126" width="150" height="140" rx="12"/>
+  <text class="t" x="414" y="152">make cast</text>
+  <text class="mono" x="414" y="176" font-size="11" fill="#57606a">0.0.0.0:8899</text>
+  <text class="tip" x="414" y="198">房间 ?room=demo</text>
+  <text class="tip" x="414" y="216">收到快照 → 广播</text>
+  <text class="tip" x="414" y="234">断线由手机自动重连</text>
+  <text class="tip" x="414" y="252">只在中转时跑</text>
+
+  <!-- 箭头 -->
+  <line x1="354" y1="196" x2="396" y2="196" stroke="#8b949e" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text class="tip" x="375" y="186" text-anchor="middle">POST</text>
+  <text class="tip" x="375" y="214" text-anchor="middle">/push</text>
+
+  <line x1="552" y1="196" x2="604" y2="196" stroke="#8b949e" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text class="tip" x="578" y="186" text-anchor="middle">SSE</text>
+  <text class="tip" x="578" y="214" text-anchor="middle">/stream</text>
+
+  <!-- 手机 -->
+  <rect class="dark" x="608" y="62" width="196" height="288" rx="26"/>
+  <rect x="684" y="70" width="44" height="6" rx="3" fill="#2c313a"/>
+  <text x="624" y="118" font-size="12" fill="#e8eaed" opacity="0.55">あさ ごはんを 食べた</text>
+  <text x="624" y="146" font-size="11" fill="#aab4c2" opacity="0.5">吃了早饭。</text>
+  <text x="624" y="182" font-size="21" fill="#e8eaed">昨日 買った</text>
+  <text x="624" y="210" font-size="21" fill="#e8eaed">本を 読む</text>
+  <text x="624" y="234" font-size="13" fill="#aab4c2">读昨天买的书。</text>
+  <text x="624" y="266" font-size="12" fill="#e8eaed" opacity="0.55">あしたは 図書館へ</text>
+  <rect x="624" y="300" width="164" height="3" rx="1.5" fill="#2b3038"/>
+  <rect x="624" y="300" width="60" height="3" rx="1.5" fill="#ffffff"/>
+  <text x="782" y="340" font-size="15" fill="#c9d1d9" text-anchor="end">⚙</text>
+
+  <!-- 底部说明 -->
+  <text class="tip" x="40" y="356">手机打开终端里打印的地址（<tspan class="mono">http://192.168.x.x:8899/?room=demo</tspan>），或 <tspan class="mono">&lt;主机名&gt;.local:8899</tspan>。</text>
+  <text class="tip" x="40" y="378">首次运行要在 macOS 防火墙弹窗点「允许」；「分享 → 添加到主屏幕」后从图标打开就没有地址栏。</text>
+  <text class="tip" x="40" y="400">手机上的排版与浮窗同一套：点画面浮出 ⚙ 调样式 / 字号 / 颜色 / 双语 / 上下文 / 进度条。</text>
+</svg>
