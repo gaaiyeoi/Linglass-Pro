@@ -3859,12 +3859,19 @@ body { background: var(--llg-glass-${glass}); }
     const lines = currentLines();
     const tokens = richTokens(lines.primary);
     const current = track && typeof track.getCurrent === 'function' ? track.getCurrent() : null;
+    const prev = contextCue(-1);
+    const next = contextCue(1);
+    // 相邻句的译文是「播放到它才有」的，晚一拍才进轨道。必须把它们的译文
+    // 也算进 key，否则缓存会一直返回「上下句只有原文」的那一帧：
+    // 手机上的中文要么迟迟不出现，要么在换句时才突然冒出来（PLAN 066）。
     const key = [
       current ? current.index : -1,
       lines.primary,
       lines.secondary,
       appearance.dual ? 1 : 0,
       tokens ? 1 : 0,
+      prev ? prev.secondary : '',
+      next ? next.secondary : '',
     ].join('\u0000');
 
     if (castCache.key === key && castCache.value) return castCache.value;
@@ -3879,8 +3886,8 @@ body { background: var(--llg-glass-${glass}); }
         : partsToSegments(primaryParts(lines.primary, castPoints)),
       // 双语关掉时官方也不显示译文行 —— 手机跟着它
       secondary: appearance.dual ? lines.secondary || '' : '',
-      prev: contextCue(-1),
-      next: contextCue(1),
+      prev,
+      next,
     };
     castCache = { key, value };
     return value;

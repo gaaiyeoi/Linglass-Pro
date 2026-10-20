@@ -1315,10 +1315,28 @@
     }
   }
 
+  /**
+   * 这一句的 start/end 是不是官方给的（骨架句）。
+   *
+   * 采样句的时间戳来自 MutationObserver 触发那一刻的 currentTime（±100ms），
+   * 对「提前一个动画时长起跑」这种用法来说误差是可见的；手机端据此决定要不要
+   * 用它的 start 去排程（PLAN 073）。只读、不改轨道。
+   */
+  function isOfficialAt(start) {
+    const t = Number(start);
+    if (!Number.isFinite(t)) return false;
+    const index = indexAt(t);
+    if (index < 0) return false;
+    const cue = cues[index];
+    // 允许 20ms 的浮点差：手机端拿到的 start 经过 JSON 往返
+    return !!cue && Math.abs(cue.start - t) < 0.02 && officialCues.has(cue);
+  }
+
   const api = {
     subscribe,
     getCues: () => cues,
     getCurrent,
+    isOfficialAt,
     getProgress,
     // 与 getProgress() 同义，但「时间轴与画面句不一致」时返回 null 而不是 0（PLAN 062）
     getProgressOrNull: progressValue,

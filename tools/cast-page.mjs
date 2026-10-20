@@ -123,10 +123,10 @@ export function renderPage(room, bootPrefs) {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     /* 行间距全部由各行的 margin 精确控制（PLAN 063） */
     gap: 0;
-    /* 控制条已挪到右侧竖排，底部只剩一条 5px 进度条：留 24px 即可。
-       上下留白接近对称，字幕块因此落在画面正中，不再被控件顶上去（PLAN 063 v2） */
-    padding: calc(env(safe-area-inset-top) + 8px) var(--pad)
-             calc(env(safe-area-inset-bottom) + 24px);
+    /* 控件全部搬到顶部横排（PLAN 063 v5）：顶部让出工具条 + 状态行，
+       底部只留进度条；左右 12px，右侧不再有竖排按钮，字幕可用宽度更大 */
+    padding: calc(env(safe-area-inset-top) + 78px) var(--pad)
+             calc(env(safe-area-inset-bottom) + 32px);
   }
   /* 上下文行：整段一起淡到 40%，字号与颜色由 appearanceCss 给（13px） */
   .ctx {
@@ -139,11 +139,26 @@ export function renderPage(room, bootPrefs) {
     display: block; line-height: 1.4; text-align: center; white-space: pre-wrap;
     max-width: 100%;
   }
+  /* 卷轴窗口（PLAN 065 v2）：高度跟着字幕板走，换句时整块板在窗口里上下滚，
+     滚出窗口的部分被裁掉 —— 不额外造任何覆盖层，DOM 里始终只有一块字幕板。 */
+  #reel {
+    position: relative;
+    display: flex; flex-direction: column; align-items: center;
+    width: 100%; overflow: hidden;
+    /* 主译文的底部外边距：单语（译文隐藏）时它仍把主字幕与下文预览隔开 */
+    margin-bottom: 16px;
+  }
   #plate {
     display: flex; flex-direction: column; align-items: center;
     box-sizing: border-box; max-width: 100%;
-    /* 主译文的底部外边距：单语（译文隐藏）时它仍把主字幕与下文预览隔开 */
-    margin-bottom: 16px;
+  }
+  /* 换句时滚出去的那一格（PLAN 068）：新句从下方进窗口的同时，旧句在同一窗口里
+     向上滚出，两块板拼成一次连续滚动。它不是 cloneNode 出来的快照 —— 节点是从
+     #plate 直接**搬**过来的，动完就清空，所以窗口里任何时刻只有两块真实字幕板。 */
+  #ghost {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; flex-direction: column; align-items: center;
+    pointer-events: none;
   }
   /* 句内进度只铺在日语原文背后（PLAN 063 v3）：极淡的蓝，不抢文字；
      译文行不铺，避免两行各有一条进度、看起来像两个播放位置。 */
@@ -155,15 +170,15 @@ export function renderPage(room, bootPrefs) {
     transform: scaleX(0); transform-origin: left center;
     will-change: transform;
   }
+  /* 一行放下整句（PLAN 063 v6）：nowrap 之后由 fitLine() 按实际宽度等比缩小字号，
+     不再折行；两行各自独立算，译文不会跟着原文一起缩。 */
   #line-primary, #line-secondary {
     position: relative; display: block;
-    text-align: center; white-space: pre-wrap;
+    text-align: center; white-space: nowrap;
     max-width: 100%;
   }
   /* 压在填充之上：kfill 是绝对定位，默认画在普通流后面 */
-  #line-primary { z-index: 1; }
-  /* balance 只在放得下两行时生效（Safari 17.5+）：避免长句末尾只剩一个字独占一行 */
-  #line-primary { line-height: 1.6; text-wrap: balance; }
+  #line-primary { z-index: 1; line-height: 1.6; }
   /* 带注音的行需要额外行距：rt 悬在基字上方，自身不撑开行盒，
      只按 1.6 会给上一行让出 0 像素，注音直接压到上一行（真机实测）。 */
   #line-primary:has(ruby) { line-height: 2; }
@@ -171,6 +186,22 @@ export function renderPage(room, bootPrefs) {
   #line-secondary { line-height: 1.5; margin-top: 8px; }
   /* 注音：12px（appearanceCss 按档位算）/ 80% 白；抬到汉字正上方并留 4px 间距 */
   #line-primary rt {
+    font-weight: 400; letter-spacing: 0;
+    color: rgba(255, 255, 255, .8);
+    line-height: 1.2;
+    padding-bottom: 4px;
+  }
+  /* 滚出去那一格的骨架与注音：字号 / 颜色 / 描边仍由 appearanceCss 按同一档位给，
+     这里只补 #line-primary 那几条无法继承的排版规则（PLAN 068） */
+  #ghost-primary, #ghost-secondary {
+    position: relative; display: block;
+    text-align: center; white-space: nowrap;
+    max-width: 100%;
+  }
+  #ghost-primary { line-height: 1.6; }
+  #ghost-primary:has(ruby) { line-height: 2; }
+  #ghost-secondary { line-height: 1.5; margin-top: 8px; }
+  #ghost-primary rt {
     font-weight: 400; letter-spacing: 0;
     color: rgba(255, 255, 255, .8);
     line-height: 1.2;
@@ -210,11 +241,11 @@ export function renderPage(room, bootPrefs) {
     will-change: transform;
   }
 
-  /* 状态挪到左上：右上让给常驻的齿轮（控制条已改为右侧竖排，见 PLAN 063 v2） */
+  /* 状态在工具条正下方居中：顶部一行只留工具条，避免与字幕左右抢空间 */
   #status {
-    position: fixed; top: calc(env(safe-area-inset-top) + 8px);
-    left: var(--pad);
-    font-size: 12px; color: #7a7a80; letter-spacing: .02em;
+    position: fixed; top: calc(env(safe-area-inset-top) + 56px);
+    left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #7a7a80; letter-spacing: .02em;
     display: flex; align-items: center; gap: 6px;
   }
   #dot { width: 6px; height: 6px; border-radius: 50%; background: #4b5563; }
@@ -222,71 +253,62 @@ export function renderPage(room, bootPrefs) {
   #status.off { color: #f87171; }
   #status.off #dot { background: #f87171; }
 
-  /* 播放控制条：常驻（PLAN 044），v2 改为贴右侧竖排（PLAN 063 v2）。
-     竖排放在右下方，避开垂直居中的字幕块；底部只留整片进度条，
-     字幕因此不再被控件顶到画面上半部。 */
+  /* 播放控制条：常驻（PLAN 044），v5 改为顶部横排（PLAN 063 v5）。
+     右侧竖排会压住长句的右端，横排到顶部后字幕左右都能用满。 */
   #controls {
-    position: fixed; right: max(12px, env(safe-area-inset-right));
-    bottom: calc(env(safe-area-inset-bottom) + 40px);
-    display: flex; flex-direction: column; align-items: stretch; gap: 4px;
-    padding: 4px; border-radius: 20px;
+    position: fixed; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top) + 8px);
+    display: flex; flex-direction: row; align-items: center; gap: 2px;
+    padding: 3px; border-radius: 14px;
     background: rgba(24, 24, 27, .92); border: 1px solid rgba(255, 255, 255, .12);
     z-index: 20;
   }
   #controls button {
     background: none; border: 0; color: #e5e7eb;
-    width: 52px; height: 38px; padding: 0;
+    width: 48px; height: 36px; padding: 0;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 16px; font-size: 14px;
+    border-radius: 11px; font-size: 14px;
     font-variant-numeric: tabular-nums;
   }
-  #controls button svg { width: 18px; height: 18px; }
+  #controls button svg { width: 17px; height: 17px; }
   #controls button:active { background: rgba(255, 255, 255, .14); }
-  /* 图标按钮之间用细分隔线分组：设置 / 回退·播放·快进 / 倍速 */
+  /* 横排时用竖线分组：设置 / 回退·播放·快进 / 倍速 */
   #controls .group-sep {
-    height: 1px; margin: 2px 8px;
+    width: 1px; height: 18px; margin: 0 3px;
     background: rgba(255, 255, 255, .12);
   }
 
-  /* 选句浮层（PLAN 045）：上滑打开，中间那行是「松手要跳到的句子」。
-     只画 ±2 行 —— 手机屏幕小，五行刚好够看出上下文，又不会盖满整屏。 */
-  #picker {
-    position: fixed; inset: 0; z-index: 40;
-    display: flex; align-items: center; justify-content: center;
-    background: rgba(10, 11, 13, .76);
-    opacity: 0; pointer-events: none;
-    transition: opacity .18s ease;
+  /* 选句（PLAN 045 → 067）：早期版本会弹一张盖住整屏的浮层，字型与位置都与字幕
+     不同，滑动时像在操作另一个界面。现在没有浮层，手势直接驱动字幕位本身 ——
+     候选句写在 #plate 上，原文与上下句沿用当前外观，只有一块极淡的蓝底标出
+     「松手会跳到这里」。 */
+  #stage.picking .kline {
+    border-radius: 10px;
+    background: rgba(10, 132, 255, .14);
+    box-shadow: inset 0 0 0 1px rgba(10, 132, 255, .4);
   }
-  #picker.open { opacity: 1; pointer-events: auto; }
-  .picker-card { width: min(88vw, 620px); text-align: center; }
-  .picker-tip {
-    font-size: 12px; color: rgba(255, 255, 255, .5);
-    letter-spacing: .04em; margin-bottom: 10px;
-  }
-  .picker-rows { display: flex; flex-direction: column; gap: 6px; }
-  .picker-row {
-    font-size: 16px; line-height: 1.35; color: rgba(255, 255, 255, .3);
-    padding: 6px 10px; border-radius: 8px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    min-height: 30px;
-  }
-  .picker-row.center {
-    font-size: 21px; color: #fff; font-weight: 600;
-    white-space: normal;
-    background: rgba(10, 132, 255, .18);
-    box-shadow: inset 0 0 0 1px rgba(10, 132, 255, .5);
-  }
-  .picker-time {
-    margin-top: 10px; font-size: 12px; color: rgba(255, 255, 255, .45);
+  /* 选句时唯一新增的界面元素：底部一行说明滑到了第几句、对应时间 */
+  #pick-badge {
+    position: fixed; left: 50%;
+    bottom: calc(env(safe-area-inset-bottom) + 40px);
+    transform: translateX(-50%) translateY(4px);
+    padding: 3px 10px; border-radius: 999px;
+    background: rgba(24, 24, 27, .82);
+    font-size: 12px; letter-spacing: .03em;
     font-variant-numeric: tabular-nums;
+    color: rgba(255, 255, 255, .6);
+    opacity: 0; pointer-events: none; z-index: 22;
+    transition: opacity .12s ease, transform .12s ease;
   }
+  #pick-badge.show { opacity: 1; transform: translateX(-50%); }
+  /* 竖屏建议文案与选句说明占同一块地方，选句时让位 */
+  #stage.picking ~ #hint { display: none; }
 
-  /* 倍速：图标 + 右下角小数值。倍速是数值，纯图标看不出当前档位，
-     所以保留一个 9px 的角标，其余按钮一律只有图标。 */
-  #rate { position: relative; }
+  /* 倍速按钮只放数值（PLAN 063 v6）：图标表达不出档位，数值本身就是最好的标识。
+     选择器带上 #controls，否则压不过 #controls button 的 48px。 */
+  #controls #rate { width: 64px; }
   #rate-badge {
-    position: absolute; right: 5px; bottom: 3px;
-    font-size: 9px; line-height: 1; color: #64d2ff;
+    font-size: 14px; line-height: 1; color: #64d2ff;
     letter-spacing: .02em;
   }
 
@@ -366,7 +388,7 @@ export function renderPage(room, bootPrefs) {
   /* 只在 Safari 里直接打开（非 standalone）时出现：教一次怎么去掉地址栏 */
   #install {
     position: fixed; left: 50%; transform: translateX(-50%);
-    top: calc(env(safe-area-inset-top) + 34px);
+    top: calc(env(safe-area-inset-top) + 82px);
     width: min(92vw, 520px);
     background: rgba(24, 24, 27, .94);
     border: 1px solid rgba(255, 255, 255, .12);
@@ -387,7 +409,7 @@ export function renderPage(room, bootPrefs) {
   }
   #hint {
     display: none; position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(env(safe-area-inset-bottom) + 108px);
+    bottom: calc(env(safe-area-inset-bottom) + 30px);
     font-size: 12px; color: #4b5563; letter-spacing: .08em;
     z-index: 9;
   }
@@ -402,12 +424,18 @@ export function renderPage(room, bootPrefs) {
     <div class="ctx-line" id="prev-primary"></div>
     <div class="ctx-line" id="prev-secondary"></div>
   </div>
-  <div id="plate">
-    <div class="kline">
-      <i class="kfill" id="fill-primary"></i>
-      <div id="line-primary"></div>
+  <div id="reel">
+    <div id="plate">
+      <div class="kline">
+        <i class="kfill" id="fill-primary"></i>
+        <div id="line-primary"></div>
+      </div>
+      <div id="line-secondary"></div>
     </div>
-    <div id="line-secondary"></div>
+    <div id="ghost" class="hidden" aria-hidden="true">
+      <div class="kline"><div id="ghost-primary"></div></div>
+      <div id="ghost-secondary" class="hidden"></div>
+    </div>
   </div>
   <div id="next" class="ctx hidden">
     <div class="ctx-line" id="next-primary"></div>
@@ -416,13 +444,7 @@ export function renderPage(room, bootPrefs) {
 </div>
 <div id="progress"><i id="progress-fill"></i></div>
 <div id="status"><i id="dot"></i><span id="status-text">连接中…</span></div>
-<div id="picker" aria-hidden="true">
-  <div class="picker-card">
-    <div class="picker-tip">上下滑动选句 · 松手跳到该句</div>
-    <div class="picker-rows" id="picker-rows"></div>
-    <div class="picker-time" id="picker-time"></div>
-  </div>
-</div>
+<div id="pick-badge" aria-hidden="true"><span id="pick-badge-text"></span></div>
 <div id="controls">
   <button id="gear" type="button" aria-label="设置">
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -453,9 +475,6 @@ export function renderPage(room, bootPrefs) {
   </button>
   <span class="group-sep"></span>
   <button type="button" id="rate" data-cmd="rate" aria-label="切换倍速">
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path fill="currentColor" d="M3.5 6.5L10 12l-6.5 5.5zM12.5 6.5L19 12l-6.5 5.5z"/>
-    </svg>
     <span id="rate-badge">1×</span>
   </button>
 </div>
@@ -632,7 +651,6 @@ export function renderPage(room, bootPrefs) {
     const primary = typePx(TYPE_SPEC.primary, scale);
     const secondary = typePx(TYPE_SPEC.secondary, scale);
     const context = typePx(TYPE_SPEC.context, scale);
-    const ruby = typePx(TYPE_SPEC.ruby, scale);
     const edge = textEdgeOf(spec, primary);
     const letterSpacing = spec.letterSpacingEm ? spec.letterSpacingEm + 'em' : 'normal';
     const primaryColor = target.color;
@@ -652,23 +670,30 @@ export function renderPage(room, bootPrefs) {
       + ' paint-order: ' + edge.paintOrder + '; }';
 
     return [
-      // 当前原文：24px / 600 / 不透明
-      line('#line-primary', target.primaryLang, primary, 600, primaryColor),
+      // 当前原文：24px / 600 / 不透明。滚出去那一格（#ghost-*）必须与它同档，
+      // 否则换句时新旧两句的字号会差一截（PLAN 068）
+      line('#line-primary, #ghost-primary', target.primaryLang, primary, 600, primaryColor),
       // 主译文：16px / 400 / 85%
-      line('#line-secondary', target.secondaryLang, secondary, 400, secondaryColor),
+      line('#line-secondary, #ghost-secondary', target.secondaryLang, secondary, 400, secondaryColor),
       // 上文 / 下文预览：13px / 400 / 40%
       line('#prev-primary, #next-primary', target.primaryLang, context, 400, contextColor),
       line('#prev-secondary, #next-secondary', target.secondaryLang, context, 400, contextColor),
-      // 注音：12px / 400 / 80%（颜色与 4px 间距在静态 CSS 里）
-      '#line-primary rt { font-size: ' + ruby + 'px; }',
+      // 注音：0.5em（= 18px @ 36px）。必须用 em —— fitLine 缩原文时注音要等比缩，
+      // 固定 px 会让注音反过来撑宽整行，怎么迭代都缩不进一行
+      '#line-primary rt { font-size: .5em; }',
     ].join('\\n');
   }
 
   // ================================================================ DOM
 
   const stageEl = document.getElementById('stage');
+  const reelEl = document.getElementById('reel');
+  const plateEl = document.getElementById('plate');
   const linePrimary = document.getElementById('line-primary');
   const lineSecondary = document.getElementById('line-secondary');
+  const ghostEl = document.getElementById('ghost');
+  const ghostPrimary = document.getElementById('ghost-primary');
+  const ghostSecondary = document.getElementById('ghost-secondary');
   const prevEl = document.getElementById('prev');
   const nextEl = document.getElementById('next');
   const prevPrimary = document.getElementById('prev-primary');
@@ -687,9 +712,8 @@ export function renderPage(room, bootPrefs) {
   const rateBadge = document.getElementById('rate-badge');
   const sheetEl = document.getElementById('sheet');
   const styleEl = document.getElementById('appearance');
-  const pickerEl = document.getElementById('picker');
-  const pickerRows = document.getElementById('picker-rows');
-  const pickerTime = document.getElementById('picker-time');
+  const pickBadge = document.getElementById('pick-badge');
+  const pickBadgeText = document.getElementById('pick-badge-text');
 
   /**
    * 播放 / 暂停图标用内联 SVG，不用三角形、双竖线这类字符：
@@ -776,6 +800,21 @@ export function renderPage(room, bootPrefs) {
   let lastSeq = -1;
   let lastCurKey = '';
   let lastPayload = null;
+  /**
+   * 静态块（PLAN 071）：cur/prev/next/cues/plan/style 不再每帧重传，
+   * 收到一次就存下来，后续的「只有播放头」的帧靠它补齐。
+   */
+  const STATIC_FIELDS = ['cur', 'prev', 'next', 'cues', 'plan', 'style'];
+  let staticBlock = null;
+
+  /**
+   * 整条轨（PLAN 072）：扩展分块下发，攒齐后断流也能按本地时钟继续换句。
+   * cues[i] 是 [start, end, primary, secondary]，可能有洞（块丢了）。
+   */
+  const trackStore = { ver: '', total: 0, cues: [], got: 0 };
+  /** 上一帧到达的本地时刻：超过 STALE_STREAM_MS 没新帧就认为断流 */
+  let lastFrameAt = 0;
+  const STALE_STREAM_MS = 1200;
 
   /**
    * 两条进度条都靠**本地时钟插值**，不靠 4Hz 的推送做动画。
@@ -814,6 +853,494 @@ export function renderPage(room, bootPrefs) {
       primaryLang: langPrimary,
       secondaryLang: langSecondary,
     });
+    // 样式表刚换过：上一轮的行内缩字号要按新基准重算
+    fitBothLines();
+  }
+
+  /**
+   * 让一行装下整句（PLAN 063 v6）。
+   *
+   * 两行都是 white-space: nowrap，超出的部分会被裁掉；这里按实际宽度等比缩小字号，
+   * 直到放得下。下限 minPx，避免极长句缩到看不清。两行各自独立算，译文不跟原文一起缩。
+   */
+  function fitLine(el, minPx) {
+    if (!el || !el.textContent) return;
+    if (getComputedStyle(el).display === 'none') return;
+    // 先回到样式表给的字号，否则上一轮的缩小结果会当成新基准
+    el.style.fontSize = '';
+    const base = parseFloat(getComputedStyle(el).fontSize);
+    if (!(base > 0)) return;
+    const pad = parseFloat(getComputedStyle(stageEl).paddingLeft) || 0;
+    const avail = stageEl.clientWidth - pad * 2;
+    if (!(avail > 0)) return;
+    // 注音、段间距、字距不严格随字号线性变化，迭代几次才收敛
+    let size = base;
+    for (let i = 0; i < 3 && el.scrollWidth > avail; i += 1) {
+      const need = el.scrollWidth;
+      if (!(need > 0)) break;
+      // 0.97 给取整留余量，否则向下取一位小数后可能还差 1px
+      size = Math.max(minPx, Math.min(size, size * (avail / need) * 0.97));
+      el.style.fontSize = (Math.floor(size * 10) / 10) + 'px';
+      if (size <= minPx) break;
+    }
+  }
+
+  function fitBothLines() {
+    fitLine(linePrimary, 12);
+    fitLine(lineSecondary, 13);
+  }
+
+  // ================================================================ 换句动效（PLAN 065 → 068 → 069）
+  //
+  // PLAN 065 是「旧句滑出 → 换字 → 新句滑入」的串行两段：中间有一段窗口全空的
+  // 空档，看起来是「闪了一下」而不是滚动。PLAN 068 改成两块板在同一窗口里
+  // **并行拼合滚动**：
+  //   旧句（#ghost）从 0 滚到 -H，新句（#plate）从 +H 滚到 0，同一时长、同一缓动。
+  // 任一时刻滚到多少，两块板在窗口里都正好接在一起（旧句底边 = 新句顶边），
+  // 观感就是歌词卷轴实实在在地滚了一整格，而不是原地淡入淡出。
+  //
+  // PLAN 069 换掉的是「什么时候起跑」：以前是「帧到达 → 检测换句 → 起跑」，而帧到达
+  // 时刻被 250ms 的推送节拍与网络抖动着走，动效再顺也像在按拍子跳。现在帧里带
+  // sentAt 与 plan（未来两句的 start），手机把换句排到**本地时钟**上，并用实到帧
+  // 校准「预测 − 实际」的固定偏差 —— 与 PLAN 062 对进度条做的事同源。
+
+  /** 一次换句的动效时长上限；实际时长按「距下一句还有多久」收缩（PLAN 069） */
+  const SWAP_MS = 260;
+  /** 收缩下限：再短就看不出是滚动，不如直接换字 */
+  const SWAP_MIN_MS = 140;
+  /** 只剩这么点时间动画来不及表达方向，直接换字 */
+  const SWAP_CUT_MS = 80;
+  /** 预测偏差的平滑系数：越小越稳，越大越跟手 */
+  const SWAP_BIAS_ALPHA = 0.3;
+  /** 单程延迟样本窗口（帧数） */
+  const LATENCY_WINDOW = 20;
+  const SWAP_EASE = 'cubic-bezier(.32,.72,.26,1)';
+
+  /** 上一帧的句首时间：判断新句是「往后」还是「往前」（拖动选句时反过来） */
+  let lastCueStart = null;
+  /**
+   * 已经显示在板上的那句（按 cue.start 认，PLAN 069）。
+   *
+   * 排程换句用的是「未来句的纯文本」，实到帧带的是同一句的 segments ——
+   * 靠这个值把两者认成同一句，才不会滚第二次。
+   */
+  let shownCueStart = null;
+  /** 本次换句动画何时结束；早于它到达的「上一句」帧属于陈旧帧（见 isStaleFrame） */
+  let swapEndsAt = 0;
+
+  /**
+   * 到达时刻的排队延迟（PLAN 069）。
+   *
+   * sentAt 是扩展侧的 Date.now()，两台机器的时钟可能有任意时差 —— 这里**不做对时**，
+   * 只取最近若干帧里最小的那个当「最顺利的一次」，其余帧相对它的超出量就是排队时间。
+   * 用它把「帧到达时刻」还原成「扩展取样的时刻」，位置估值的抖动就只剩系统性的一份。
+   */
+  const queue = { samples: [], min: null };
+
+  /**
+   * 手机 ↔ 服务端的时钟差（PLAN 075）。
+   *
+   * offset = 服务端的墙钟 − 手机的墙钟。扩展与中转进程在同一台 Mac（localhost），
+   * 所以它也等于「扩展墙钟 − 手机墙钟」。测出来之后 sentAt 就能直接换算成单程延迟，
+   * 不用再靠「实到帧 − 预测」慢慢学（PLAN 069 的 bias 只做残差微调）。
+   */
+  const clockSync = { offset: null, rtt: null, inflight: false };
+
+  async function syncClock() {
+    if (clockSync.inflight) return;
+    clockSync.inflight = true;
+    const t0 = Date.now();
+    try {
+      const res = await fetch('/ping', { cache: 'no-store' });
+      const data = await res.json();
+      const t1 = Date.now();
+      if (!Number.isFinite(data && data.at)) return;
+      const rtt = t1 - t0;
+      // 只用更小的 RTT 覆盖：大 RTT 说明这一次排过队，算出来的单程不干净
+      if (!Number.isFinite(clockSync.rtt) || rtt <= clockSync.rtt) {
+        clockSync.rtt = rtt;
+        clockSync.offset = data.at + rtt / 2 - t1;
+      }
+    } catch {
+      // 服务端没有 /ping（旧版本）：退回 PLAN 069 的相对最小样本估计
+    } finally {
+      clockSync.inflight = false;
+    }
+  }
+
+  function noteQueueDelay(sentAt, arrivalWall) {
+    if (!Number.isFinite(sentAt)) return 0;
+    // 有 RTT 测出的时钟差就先对齐，再取最小样本扣排队量；没有就退回原口径
+    const aligned = Number.isFinite(clockSync.offset) ? arrivalWall + clockSync.offset : arrivalWall;
+    const raw = aligned - sentAt;
+    // 极端值（时钟被改、服务端重放旧帧）会把最小值带偏，直接丢
+    if (!(Math.abs(raw) < 6 * 60 * 60 * 1000)) return 0;
+    queue.samples.push(raw);
+    if (queue.samples.length > LATENCY_WINDOW) queue.samples.shift();
+    queue.min = Math.min(...queue.samples);
+    return Math.max(0, raw - queue.min);
+  }
+
+  /** 当前帧对应的视频时钟：sendLocal = 扩展取样那一刻的本地 performance.now() */
+  let frameClock = null;
+
+  function updateFrameClock(payload, now, arrivalWall) {
+    const timeline = payload.timeline;
+    if (!timeline || !(timeline.duration > 0) || !Number.isFinite(timeline.position)) {
+      frameClock = null;
+      return;
+    }
+    const excess = noteQueueDelay(payload.sentAt, arrivalWall);
+    frameClock = {
+      sendLocal: now - excess,
+      pos: Number(timeline.position),
+      rate: Number(payload.rate) > 0 ? Number(payload.rate) : 1,
+      // 缓冲时 playing 仍是 true，但画面没在动：本地时钟必须一起冻住（PLAN 070）
+      playing: payload.playing !== false && payload.stalled !== true,
+    };
+  }
+
+  /** 视频时间（秒）→ 本地 performance.now()；拿不到时间轴时返回 null */
+  function localAt(videoTime) {
+    if (!frameClock || !Number.isFinite(videoTime)) return null;
+    return frameClock.sendLocal + ((videoTime - frameClock.pos) / frameClock.rate) * 1000;
+  }
+
+  /**
+   * 这一帧是不是「已经翻过去的那一句」的迟到帧（PLAN 069）。
+   *
+   * 排程换句会在句边界**那一刻**滚完，而那个时候还有几帧（250ms 节拍内）仍在报上一句。
+   * 不挡的话它们会立刻把字幕滚回去，下一帧再滚回来 —— 实测就是这样来回跳。
+   * 判据用本地时钟：要么动画还在跑，要么视频估值已经越过这一句的起点。
+   * 往回拖进度条时视频估值也跟着退回去，所以真实的 seek 不会被误挡。
+   */
+  function isStaleFrame(cueStart, now) {
+    if (cueStart == null || shownCueStart == null) return false;
+    if (!(cueStart < shownCueStart - 0.02)) return false;
+    if (now < swapEndsAt) return true;
+    if (!frameClock || !frameClock.playing) return false;
+    const pos = frameClock.pos + ((now - frameClock.sendLocal) / 1000) * frameClock.rate;
+    return pos >= shownCueStart - 0.05;
+  }
+
+  /**
+   * 换句排程（PLAN 069）。
+   *
+   * bias 是「本地时钟预测」相对「实际到达」的固定偏差：第一次排程按 0 算，之后每来
+   * 一个真的换句帧就用「到达时刻 − 预测时刻」修正（推送一拍、网络单向延迟、两台机器
+   * 的取样口径差都折进这一项）。这样网络抖动只影响校准值的一阶平滑，不进动效。
+   */
+  const swapCtl = {
+    /** 是否已经用「最小单程延迟」播过种（PLAN 075）；之后交给 EWMA 微调 */
+    seeded: false,
+    bias: 0,
+    /** 已排程的目标句起点（秒）；null = 没排程 */
+    start: null,
+    /** plan 里那一项：换句时用它先把原文写上去 */
+    entry: null,
+    /** 换句应该在本地时钟的哪一刻完成 */
+    due: 0,
+    /** 起跑时刻 = due - 时长 */
+    at: 0,
+  };
+
+  function clearSwapPlan() {
+    swapCtl.start = null;
+    swapCtl.entry = null;
+    swapCtl.due = 0;
+    swapCtl.at = 0;
+  }
+
+  /**
+   * 用这一帧的 plan 重新排一次换句。
+   *
+   * 不排程的四种情况：选句中、暂停、拿不到时间轴（直播 / 元数据未到）、plan 里没有
+   * 比当前句更晚的一句。这几种都退回「实到帧驱动」（PLAN 068 的旧行为）。
+   */
+  function planSwap(payload, now) {
+    clearSwapPlan();
+    if (picking || !frameClock || !frameClock.playing) return;
+
+    const plan = Array.isArray(payload.plan) ? payload.plan : null;
+    const curStart = Number(payload.cue && payload.cue.start);
+    if (!plan || !plan.length || !Number.isFinite(curStart)) return;
+
+    let next = null;
+    for (const item of plan) {
+      const start = Number(item && item.start);
+      if (!Number.isFinite(start)) continue;
+      // 只认「更晚的一句」：plan[0] 是当前句，往回拖进度条时它可能比上一帧更早
+      if (start <= curStart + 0.02) continue;
+      // 已经滚上来的那一句不再排：迟到帧会把上一个换句点重新算出来（见 isStaleFrame）
+      if (shownCueStart != null && start <= shownCueStart + 0.02) continue;
+      if (!next || start < Number(next.start)) next = item;
+    }
+    if (!next || !String(next.primary || '').trim()) return;
+    // 采样句的 start 有 ±100ms 误差（PLAN 073）：宁可晚一拍由实到帧触发，
+    // 也不要在它前面提前一个动画时长起跑 —— 那会把误差放大成「滚早了等字幕」。
+    if (next.official !== true) return;
+
+    // 首次排程就用「最小单程延迟」把偏差播种（PLAN 075）：
+    // 预测值比真实时刻晚了这个量，先扣掉，之后再由 EWMA 微调残差。
+    // 没有测到时钟差时 queue.min 含两台机器的时钟偏移（可能是任意值），绝不能拿来播种。
+    if (!swapCtl.seeded && Number.isFinite(clockSync.offset) && Number.isFinite(queue.min)) {
+      swapCtl.bias = -Math.min(400, Math.max(0, queue.min));
+      swapCtl.seeded = true;
+    }
+    const due = localAt(Number(next.start)) + swapCtl.bias;
+    // 已经过了（缓冲、丢帧、刚 seek 过）：不排，交给实到帧
+    if (!Number.isFinite(due) || due <= now) return;
+
+    swapCtl.start = Number(next.start);
+    swapCtl.entry = next;
+    swapCtl.due = due;
+    swapCtl.at = Math.max(now, due - SWAP_MS);
+  }
+
+  /**
+   * 用一次真实换句校准偏差。
+   *
+   * 只在「这一帧的句子正是刚才排程的那一句」时采样：seek、往回翻、排程被跳过时测出来的
+   * 都不是排程误差。样本离群（暂停恢复、跳转）也不参与平滑，否则会把后续排程带偏。
+   */
+  function observeSwap(arrival, cueStart) {
+    if (swapCtl.start == null || !Number.isFinite(cueStart)) return;
+    if (Math.abs(swapCtl.start - cueStart) > 0.02) return;
+    const lateness = arrival - swapCtl.due;
+    if (!Number.isFinite(lateness) || Math.abs(lateness) > 1500) return;
+    swapCtl.bias += lateness * SWAP_BIAS_ALPHA;
+    // 上限一拍：偏差再大也该由「实到帧驱动」兜住，不能让排程跑到几秒之外
+    swapCtl.bias = Math.max(-600, Math.min(600, swapCtl.bias));
+  }
+
+  /**
+   * 拼一块整轨（PLAN 072）。
+   *
+   * ver 变了就整份作废重来：不同版本的句子区间拼在一起，时间轴会错得比没有更离谱。
+   * got 用「新增了才算」的方式累计，重复到达的块不会把计数刷高。
+   */
+  function mergeTrack(chunk) {
+    const total = Math.max(0, Math.min(20000, Number(chunk.total) || 0));
+    const from = Math.max(0, Number(chunk.from) || 0);
+    const cues = Array.isArray(chunk.cues) ? chunk.cues : [];
+    const ver = String(chunk.ver || '');
+    if (!total) return;
+
+    if (ver !== trackStore.ver || total !== trackStore.total) {
+      trackStore.ver = ver;
+      trackStore.total = total;
+      trackStore.cues = [];
+      trackStore.got = 0;
+    }
+    let added = 0;
+    for (let i = 0; i < cues.length; i += 1) {
+      const at = from + i;
+      if (at < 0 || at >= total || !cues[i]) continue;
+      if (!trackStore.cues[at]) added += 1;
+      trackStore.cues[at] = cues[i];
+    }
+    trackStore.got += added;
+  }
+
+  /** 在整轨里定位某一时刻的句子（二分）；有洞时返回 null，交给帧驱动 */
+  function trackCueAt(seconds) {
+    if (!trackStore.total || trackStore.got < trackStore.total) return null;
+    let lo = 0;
+    let hi = trackStore.total - 1;
+    let hit = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const cue = trackStore.cues[mid];
+      if (!cue) return null;
+      if (cue[0] <= seconds) {
+        hit = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (hit < 0) return null;
+    const cue = trackStore.cues[hit];
+    return {
+      start: cue[0],
+      end: cue[1],
+      primary: cue[2] || '',
+      secondary: cue[3] || '',
+    };
+  }
+
+  /**
+   * 断流兜底（PLAN 072）：太久没收到帧、手里又有完整轨道，就按本地时钟自己换句。
+   *
+   * 网络恢复后由帧里的事实接管；已经滚过去的那一句由 isStaleFrame 挡掉，
+   * 所以不会因为「本地跑快了」而滚回去再滚一遍。
+   */
+  function tickTrackSwap(now) {
+    if (picking || !frameClock || !frameClock.playing) return;
+    if (!lastFrameAt || now - lastFrameAt < STALE_STREAM_MS) return;
+    if (!trackStore.total || trackStore.got < trackStore.total) return;
+
+    const pos = frameClock.pos + ((now - frameClock.sendLocal) / 1000) * frameClock.rate;
+    const cue = trackCueAt(pos);
+    if (!cue || !String(cue.primary || '').trim()) return;
+    if (shownCueStart != null && Math.abs(cue.start - shownCueStart) < 0.02) return;
+
+    const dir = shownCueStart != null && cue.start < shownCueStart ? -1 : 1;
+    playSwap({ primary: cue.primary, secondary: cue.secondary, segments: null }, dir, SWAP_MS);
+    shownCueStart = cue.start;
+    lastCueStart = cue.start;
+  }
+
+  /**
+   * 排程到点（由 rAF 每帧调，寄生在 paintProgress 的循环里，不另开一个）。
+   *
+   * 时长按「还剩多久」收缩：滚动结束的那一刻正好是该句开始播的时刻，
+   * 所以换句节奏由播放位置决定，而不是由推送到达时刻决定。
+   */
+  function tickSwap(now) {
+    if (swapCtl.start == null) {
+      // 没有排程时才走断流兜底：有排程说明帧还在来，别和它抢
+      tickTrackSwap(now);
+      return;
+    }
+    if (now < swapCtl.at) return;
+
+    const entry = swapCtl.entry;
+    const start = swapCtl.start;
+    const due = swapCtl.due;
+    const paused = !!frameClock && !frameClock.playing;
+    clearSwapPlan();
+    if (!entry || picking || paused) return;
+
+    const text = String(entry.primary || '');
+    if (!text) return;
+
+    const dir = shownCueStart != null && start < shownCueStart ? -1 : 1;
+    const duration = Math.min(SWAP_MS, Math.max(SWAP_MIN_MS, due - now));
+    // 预排文本只有纯文本（没有 segments）：先按原文滚上来，实到帧再补分词/注音
+    playSwap({ primary: text, secondary: entry.secondary || '', segments: null }, dir, duration);
+    shownCueStart = start;
+    lastCueStart = start;
+  }
+
+  /**
+   * 把推送里这句真正写到板上（原文、译文、自适应字号）。
+   *
+   * 指纹分两种形态：带 segments 的帧按结构比（分词 / 注音会变），排程换句那种
+   * 「只有纯文本」的帧（PLAN 069）按文本比 —— 两者不能共用一个空数组指纹，
+   * 否则纯文本那一帧会被当成「空句」跳过，板上留白。
+   */
+  function lineKey(cur) {
+    if (!cur) return 'text\u0000';
+    return cur.segments ? JSON.stringify(cur.segments) : 'text\u0000' + (cur.primary || '');
+  }
+
+  function applyLineText(cur) {
+    const key = lineKey(cur);
+    if (key !== lastCurKey) {
+      lastCurKey = key;
+      if (cur.segments && cur.segments.length) buildLine(linePrimary, cur.segments);
+      // 排程换句只有纯文本：这时也必须写进去，不能当成「空句」清掉
+      else if (cur.primary) linePrimary.textContent = cur.primary;
+      else linePrimary.replaceChildren();
+    }
+    const secondaryText = cur.secondary || '';
+    if (lineSecondary.textContent !== secondaryText) lineSecondary.textContent = secondaryText;
+    fitBothLines();
+  }
+
+  /**
+   * 把 #plate 上正在显示的这句搬到 #ghost。
+   *
+   * 用 replaceChildren(...childNodes) 是**移动节点**，不是 cloneNode：
+   * 注音、文节 span、缩过的字号都原样带过去，且不产生第二份文本。
+   */
+  function movePlateToGhost() {
+    ghostPrimary.replaceChildren(...Array.from(linePrimary.childNodes));
+    ghostPrimary.style.fontSize = linePrimary.style.fontSize || '';
+    ghostSecondary.textContent = lineSecondary.textContent;
+    ghostSecondary.style.fontSize = lineSecondary.style.fontSize || '';
+    ghostSecondary.classList.toggle('hidden', lineSecondary.classList.contains('hidden'));
+    ghostEl.classList.remove('hidden');
+    // 节点已经被搬走：这两个行内字号要按新句重新算
+    linePrimary.style.fontSize = '';
+    lineSecondary.style.fontSize = '';
+  }
+
+  function resetGhost() {
+    ghostEl.getAnimations().forEach((anim) => anim.cancel());
+    ghostEl.classList.add('hidden');
+    ghostPrimary.replaceChildren();
+    ghostSecondary.textContent = '';
+    // 动画被打断时窗口高度可能还钉着（见 playSwap）：交还给内容自己算
+    reelEl.style.height = '';
+    swapEndsAt = 0;
+  }
+
+  /** 上下句跟着换句轻推一格：边缘两行也有「整块滚了一格」的方向暗示 */
+  function nudgeCtx(dir, duration) {
+    for (const block of [prevEl, nextEl]) {
+      if (block.classList.contains('hidden')) continue;
+      block.getAnimations().forEach((anim) => anim.cancel());
+      block.animate([
+        { transform: 'translateY(' + (dir * 10) + 'px)', opacity: 0 },
+        { transform: 'translateY(0)', opacity: 1 },
+      ], { duration: duration || SWAP_MS, easing: SWAP_EASE });
+    }
+  }
+
+  /**
+   * 换句：新旧两句在同一卷轴窗口里并行滚一格。
+   *
+   * 位移量取旧窗口高度 H：旧句从 0 到 -H，新句从 +H 到 0。任一进度 p，
+   * 旧句底边在 (1-p)H、新句顶边也在 (1-p)H —— 两块板始终严丝合缝地接在一起，
+   * 所以半途看到的是「上半是旧句的下半截、下半是新句的上半截」，没有空档。
+   * 未播完的动画先取消：连续快速换句时不排队，以最新一句为准。
+   *
+   * duration 由调用方给（PLAN 069）：排程路径按「距下一句还有多久」收缩，
+   * 实到帧路径用它自己的剩余时间。
+   */
+  function playSwap(cur, dir, duration) {
+    const reduced = window.matchMedia
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // 上一次没播完的动画可能把窗口高度钉住了：先交还，再量真正的旧高度
+    reelEl.style.height = '';
+    const height = reelEl.getBoundingClientRect().height
+      || plateEl.getBoundingClientRect().height;
+    if (reduced || !(height > 0)) {
+      resetGhost();
+      applyLineText(cur);
+      return;
+    }
+
+    ghostEl.getAnimations().forEach((anim) => anim.cancel());
+    plateEl.getAnimations().forEach((anim) => anim.cancel());
+    movePlateToGhost();
+    // 新句先写进板，但整块停在窗口的「来向」一侧
+    applyLineText(cur);
+
+    // 窗口高度在这一格滚动期间钉住：不钉的话新句更高时 #reel 会立刻长高，
+    // 旧句下方露出一条空档（PLAN 068 的「下一句探进来」）。滚动结束后交给内容自己算。
+    const travel = height;
+    reelEl.style.height = travel + 'px';
+
+    const durationMs = Math.min(SWAP_MS, Math.max(SWAP_MIN_MS, duration || SWAP_MS));
+    // 这段时间里迟到帧不许把字幕滚回去（见 isStaleFrame）
+    swapEndsAt = performance.now() + durationMs;
+    const out = ghostEl.animate([
+      { transform: 'translateY(0)' },
+      { transform: 'translateY(' + (-dir * travel) + 'px)' },
+    ], { duration: durationMs, easing: SWAP_EASE });
+    plateEl.animate([
+      { transform: 'translateY(' + (dir * travel) + 'px)' },
+      { transform: 'translateY(0)' },
+    ], { duration: durationMs, easing: SWAP_EASE });
+
+    out.onfinish = () => {
+      resetGhost();
+    };
+
+    nudgeCtx(dir, durationMs);
   }
 
   /**
@@ -856,9 +1383,9 @@ export function renderPage(room, bootPrefs) {
 
     const hasCtx = !!lastPayload;
     renderCtx(prevEl, prevPrimary, prevSecondary,
-      hasCtx && prefs.ctx >= 2 ? lastPayload.prev : null);
+      hasCtx && prefs.ctx >= 2 ? lastPayload.prev : null, 'prev');
     renderCtx(nextEl, nextPrimary, nextSecondary,
-      hasCtx && prefs.ctx >= 1 ? lastPayload.next : null);
+      hasCtx && prefs.ctx >= 1 ? lastPayload.next : null, 'next');
 
     lineSecondary.classList.toggle('hidden', lastPayload
       ? (lastPayload.style && lastPayload.style.dual === false) || !prefs.dual
@@ -866,14 +1393,46 @@ export function renderPage(room, bootPrefs) {
       : false);
   }
 
-  function renderCtx(block, primaryEl, secondaryEl, cue) {
+  /**
+   * 上下文行：相邻句的译文本就晚一拍才到（骨架先只有原文），单帧也可能整块缺失。
+   * 这里做两件抗抖的事（PLAN 066）：
+   *   1. 同一句（primary 没变）时，新帧没带译文就沿用上一次的 —— 中文不再闪一下；
+   *   2. 整块延迟 260ms 再收起 —— 换句瞬间的空帧不会把行藏起来。
+   */
+  const ctxMemo = {
+    prev: { primary: '', secondary: '', timer: 0 },
+    next: { primary: '', secondary: '', timer: 0 },
+  };
+
+  function renderCtx(block, primaryEl, secondaryEl, cue, slot) {
+    const memo = ctxMemo[slot];
     const primary = cue && cue.primary ? cue.primary : '';
-    const secondary = cue && cue.secondary ? cue.secondary : '';
+    let secondary = cue && cue.secondary ? cue.secondary : '';
+    if (prefs && prefs.dual && primary && primary === memo.primary && !secondary) {
+      secondary = memo.secondary;
+    }
+    if (primary) {
+      memo.primary = primary;
+      if (secondary) memo.secondary = secondary;
+    } else {
+      memo.primary = '';
+      memo.secondary = '';
+    }
     // 幂等：同一帧里每秒会来好几次，无谓的 textContent 赋值会白白触发排版
     if (primaryEl.textContent !== primary) primaryEl.textContent = primary;
     if (secondaryEl.textContent !== secondary) secondaryEl.textContent = secondary;
     secondaryEl.classList.toggle('hidden', !secondary);
-    block.classList.toggle('hidden', !primary);
+
+    if (primary) {
+      clearTimeout(memo.timer);
+      memo.timer = 0;
+      block.classList.remove('hidden');
+    } else if (!memo.timer) {
+      memo.timer = setTimeout(() => {
+        memo.timer = 0;
+        if (!primaryEl.textContent) block.classList.add('hidden');
+      }, 260);
+    }
   }
 
   /**
@@ -891,7 +1450,8 @@ export function renderPage(room, bootPrefs) {
    * @param {string} text 画面上的那句原文（换句依据）
    */
   function syncClocks(payload, progress, text, now) {
-    const playing = payload.playing !== false;
+    // 缓冲（PLAN 070）与暂停同义：两条进度都不要再本地推进
+    const playing = payload.playing !== false && payload.stalled !== true;
     const timeline = payload.timeline;
 
     if (timeline && timeline.duration > 0) {
@@ -1004,11 +1564,27 @@ export function renderPage(room, bootPrefs) {
       fillPrimary.style.transform = 'scaleX(' + fill + ')';
     }
 
+    // 换句排程寄生在这个循环里（PLAN 069）：不另开 rAF，也不依赖推送到达
+    tickSwap(now);
+
     requestAnimationFrame(paintProgress);
   }
 
   function render(payload) {
     if (!payload) return;
+    // 同一拍里只取一次：performance.now() 是排程与动画的共用基准，
+    // Date.now() 是延迟估计的到达时刻（两者不能互相换算，见 noteQueueDelay）
+    const now = performance.now();
+    const arrivalWall = Date.now();
+    // 静态块（PLAN 071）：只在变化时随帧来，其余帧用缓存补齐，后面全按完整帧走
+    if (payload.static && typeof payload.static === 'object') staticBlock = payload.static;
+    if (staticBlock) {
+      for (const name of STATIC_FIELDS) {
+        if (payload[name] === undefined) payload[name] = staticBlock[name];
+      }
+    }
+    // 整条轨（PLAN 072）：块来了就拼，攒齐后断流也能继续换句
+    if (payload.track && typeof payload.track === 'object') mergeTrack(payload.track);
     const style = payload.style || {};
     // 服务端重启会让 seq 从头开始：比上次小就当成新的一条流，否则会一直忽略帧
     if (payload.seq < lastSeq) {
@@ -1017,10 +1593,16 @@ export function renderPage(room, bootPrefs) {
       // 换了服务端进程：两条进度都重新起算，别接着上一段的时钟走
       videoClock.active = false;
       cueClock.active = false;
+      // 延迟样本与换句排程都属于上一条流，全部作废（偏差是同一台机器的，留着）
+      queue.samples = [];
+      queue.min = null;
+      clearSwapPlan();
     }
     if (payload.seq === lastSeq) return;
     lastSeq = payload.seq;
     lastPayload = payload;
+    // 断流判据（PLAN 072）：多久没收到新帧，决定要不要用整轨自己续播
+    lastFrameAt = now;
 
     if (!prefs) prefs = readPrefs();
     if (!prefs) seedPrefs(style);
@@ -1028,29 +1610,75 @@ export function renderPage(room, bootPrefs) {
     if (style.secondaryLang) langSecondary = style.secondaryLang;
 
     const cur = payload.cur || {};
-    // 手机本地也留一份句子历史：快照没带 cues（旧扩展）时选句浮层靠它兜底
+    // 手机本地也留一份句子历史：快照没带 cues（旧扩展）时选句靠它兜底
     rememberCue(payload.cue, cur.primary);
-    const key = JSON.stringify(cur.segments || []);
-    if (key !== lastCurKey) {
-      lastCurKey = key;
-      if (cur.segments && cur.segments.length) buildLine(linePrimary, cur.segments);
-      else linePrimary.replaceChildren();
+
+    // 选句中：字幕由手势驱动（PLAN 067），推送只更新控件与状态，不抢文字 ——
+    // 否则每 250ms 一帧就会把手里选的那句换回正在播的那句。
+    if (picking) {
+      // 选句期间字幕由手势驱动：排程也必须停，否则到点会把候选句滚走（PLAN 069）
+      clearSwapPlan();
+      paintControls(payload);
+      setStatus(payload.playing === false ? '已暂停' : '已连接', true);
+      return;
     }
+
+    const cueStart = payload.cue && Number.isFinite(payload.cue.start) ? payload.cue.start : null;
+    const key = lineKey(cur);
     const secondaryText = cur.secondary || '';
-    if (lineSecondary.textContent !== secondaryText) lineSecondary.textContent = secondaryText;
-    stageEl.classList.toggle('empty', !linePrimary.textContent);
-    // 每 250ms 一帧：先比对再写（与 renderCtx 的口径一致），否则 title 会一直进
-    // MutationRecord，标签页标题也在无意义地重算
-    const nextTitle = cur.primary || '字幕屏';
-    if (document.title !== nextTitle) document.title = nextTitle;
+    const lineChanged = key !== lastCurKey || lineSecondary.textContent !== secondaryText;
+    // 方向：新句时间更靠后就是往后翻；拖动选句往回跳时反过来
+    const swapDir = lastCueStart != null && cueStart != null && cueStart < lastCueStart ? -1 : 1;
+    if (cueStart != null) lastCueStart = cueStart;
+
+    // 排程要用到「这一帧的取样时刻」：先更新本地时钟，再判陈旧帧、处理换句与重排
+    updateFrameClock(payload, now, arrivalWall);
+    // 排程换句会比这一帧更早把新句滚上来：之后陆续到达的「上一句」帧不能把它滚回去
+    const stale = isStaleFrame(cueStart, now);
+
+    // 空态与标题用推送里的文本立即更新，不等 110ms 的滑出动画
+    // （陈旧帧不参与：否则标题与字幕会在换句窗口里来回跳）
+    if (!stale) {
+      stageEl.classList.toggle('empty', !(cur.primary || '').trim());
+      // 每 250ms 一帧：先比对再写（与 renderCtx 的口径一致），否则 title 会一直进
+      // MutationRecord，标签页标题也在无意义地重算
+      const nextTitle = cur.primary || '字幕屏';
+      if (document.title !== nextTitle) document.title = nextTitle;
+    }
 
     applyPrefs();
+    if (lineChanged && !stale) {
+      // 排程已经把这句滚上来了（PLAN 069）：这一帧只补 segments / 译文，不能再滚第二次
+      const alreadyShown = cueStart != null && shownCueStart != null && cueStart === shownCueStart;
+      if (alreadyShown) {
+        applyLineText(cur);
+      } else {
+        // 实到帧是最终依据：先用它校准排程偏差，再决定这次换句的时长
+        observeSwap(now, cueStart);
+        const scheduled = swapCtl.start != null && cueStart != null
+          && Math.abs(swapCtl.start - cueStart) <= 0.02;
+        const remaining = scheduled ? swapCtl.due - now : SWAP_MS;
+        clearSwapPlan();
+
+        if (plateEl.textContent && remaining > SWAP_CUT_MS) {
+          playSwap(cur, swapDir, Math.min(SWAP_MS, remaining));
+        } else {
+          resetGhost();
+          plateEl.getAnimations().forEach((anim) => anim.cancel());
+          applyLineText(cur);
+        }
+        shownCueStart = cueStart;
+      }
+    }
 
     // 两条进度都交给本地时钟插值（paintProgress 每帧刷），这里只重设基准。
     // progress 缺失（null）= 扩展说「这一拍不可信」，不能折成 0（PLAN 062）
     const rawProgress = payload.progress;
     const progress = Number.isFinite(rawProgress) ? Math.max(0, Math.min(1, rawProgress)) : null;
-    syncClocks(payload, progress, cur.primary || '', performance.now());
+    syncClocks(payload, progress, cur.primary || '', now);
+
+    // 帧里带了未来的句子时间表就重排下一个换句点（拿不到时这里是空操作）
+    planSwap(payload, now);
 
     paintControls(payload);
     setStatus(payload.playing === false ? '已暂停' : '已连接', true);
@@ -1163,7 +1791,9 @@ export function renderPage(room, bootPrefs) {
   function fmtRate(value) {
     const rate = Number(value);
     if (!Number.isFinite(rate) || rate <= 0) return '1×';
-    return String(Math.round(rate * 100) / 100).replace(/0+$/, '').replace(/\.$/, '') + '×';
+    // 注意：这里的反斜杠在模板字符串里要写两层，否则页面拿到的是 /.$/，
+    // 会把 "1.25" 的末位数字删掉，显示成 "1.2×"
+    return String(Math.round(rate * 100) / 100).replace(/0+$/, '').replace(/\\.$/, '') + '×';
   }
 
   /**
@@ -1218,11 +1848,16 @@ export function renderPage(room, bootPrefs) {
     if (rateBadge.textContent !== shownRate) rateBadge.textContent = shownRate;
   }
 
-  // ================================================================ 上下滑动选句（PLAN 045）
+  // ================================================================ 上下滑动选句（PLAN 045 → 067）
   //
-  // 手指在字幕区上滑 → 浮层从「当前句」往前翻；滑得越远跳得越多（46px 一句）。
+  // 手指在字幕区上滑 → 候选句从「当前句」往前翻；滑得越远跳得越多（46px 一句）。
   // 松手 300ms 后发一条 seek 命令，由扩展把 Mac 上的 video.currentTime 设到该句开头。
   // 列表优先用扩展推来的 cues 窗口（当前句往前 40 句），没有时用本机累积的历史。
+  //
+  // PLAN 067：这里**不再有浮层**。候选句直接写在 #plate 上，字号 / 颜色 / 投影
+  // 全部沿用当前外观，上下句也走原来的 #prev / #next；看起来就是字幕自己在滚。
+  // 拖动期间 render() 会跳过文字更新（见 picking 分支），否则 250ms 一帧的推送
+  // 会把手里的候选句抢回正在播的那句。
 
   /** 每滑这么多像素移动一句（一行的高度，手感接近「翻一格」） */
   const PICK_ROW_PX = 46;
@@ -1234,13 +1869,20 @@ export function renderPage(room, bootPrefs) {
   /** 快照没带 cues 时的兜底：手机自己记下看过的句子 */
   const cueHistory = [];
 
-  let pickerOpen = false;
-  let pickerList = [];
+  let picking = false;
+  let pickList = [];
   let pickIndex = 0;
   let pickBaseIndex = 0;
   let pickStartY = 0;
   let pickTravel = 0;
   let pickTimer = 0;
+  /**
+   * 手势开始时正在播的那句：句子窗口是打开选句那一刻的快照，拖动期间视频还在走，
+   * 拿实时 cue 去比会让「第几句」「有没有译文」随推送漂移，所以入口处冻结这三个值。
+   */
+  let pickAnchorIndex = 0;
+  let pickAnchorStart = null;
+  let pickAnchorSecondary = '';
   /**
    * 本段触摸落在设置面板 / 控制条里：整段手势都不归选句管。
    *
@@ -1272,45 +1914,115 @@ export function renderPage(room, bootPrefs) {
     return Math.floor(total / 60) + ':' + String(total % 60).padStart(2, '0');
   }
 
-  /** 只画选中句前后各 2 行：手机屏幕小，五行已经够看出上下文 */
-  function renderPicker() {
-    const rows = [];
-    for (let off = -2; off <= 2; off += 1) {
-      const item = pickerList[pickIndex + off];
-      const row = document.createElement('div');
-      row.className = 'picker-row' + (off === 0 ? ' center' : '');
-      row.textContent = item ? String(item[1] || '—') : '';
-      rows.push(row);
-    }
-    pickerRows.replaceChildren(...rows);
-    const current = pickerList[pickIndex];
-    pickerTime.textContent = current ? fmtClock(current[0]) : '';
+  /** 推送里正在播的那句的起点；拿不到时返回 null */
+  function liveStart() {
+    const cue = lastPayload && lastPayload.cue;
+    const start = cue ? Number(cue.start) : NaN;
+    return Number.isFinite(start) ? start : null;
   }
 
-  function openPicker() {
+  /** 选中的是不是「打开选句那一刻正在播」的那句（只有它带译文） */
+  function pickIsLive() {
+    const item = pickList[pickIndex];
+    return !!item && pickAnchorStart != null
+      && Math.abs(Number(item[0]) - pickAnchorStart) < 0.01;
+  }
+
+  /** 底部那行说明：滑到第几句、对应时间 */
+  function updatePickBadge() {
+    const item = pickList[pickIndex];
+    if (!item) {
+      pickBadgeText.textContent = '';
+      return;
+    }
+    const delta = pickIndex - pickAnchorIndex;
+    const where = delta === 0
+      ? '松手回到这句'
+      : (delta < 0 ? '早 ' : '晚 ') + Math.abs(delta) + ' 句';
+    const text = fmtClock(item[0]) + ' · ' + where;
+    if (pickBadgeText.textContent !== text) pickBadgeText.textContent = text;
+  }
+
+  /** 候选句的上下文：复用 #prev / #next，跟随设置里的「上下文」档位 */
+  function paintPickCtx(block, primaryEl, secondaryEl, item, want) {
+    const primary = want && item ? String(item[1] || '') : '';
+    if (primaryEl.textContent !== primary) primaryEl.textContent = primary;
+    // 候选句只有原文（cues 是 [start, primary]），选句期间译文行留空
+    if (secondaryEl.textContent) secondaryEl.textContent = '';
+    secondaryEl.classList.add('hidden');
+    block.classList.toggle('hidden', !primary);
+  }
+
+  /**
+   * 把候选句写到字幕位上，而不是另画一层。
+   *
+   * 只有命中正在播的那句时才带译文：cues 里每句只有原文，凭空补译文会给出
+   * 一句和原文对不上的中文。其余情况让译文行空着，看到的就是真实原文。
+   */
+  function paintPick() {
+    const cur = pickList[pickIndex] || null;
+    const prev = pickList[pickIndex - 1] || null;
+    const next = pickList[pickIndex + 1] || null;
+    const dual = !prefs || prefs.dual;
+    const secondary = pickIsLive() && dual ? pickAnchorSecondary : '';
+
+    // 选句写的是纯文本：清掉 segments 指纹，交回推送时才会按 segments 重建原文
+    lastCurKey = '';
+    plateEl.getAnimations().forEach((anim) => anim.cancel());
+    const primaryText = cur ? String(cur[1] || '') : '';
+    if (linePrimary.textContent !== primaryText) linePrimary.textContent = primaryText;
+    // 译文行占着位：候选中只有正在播的那句有译文，直接撤掉这一行会让原文上下跳一格。
+    // 用零宽字符撑住行高，松手回到实时字幕时再按真实内容重排。
+    const secondaryText = dual ? (secondary || '\\u200b') : '';
+    if (lineSecondary.textContent !== secondaryText) lineSecondary.textContent = secondaryText;
+    lineSecondary.classList.toggle('hidden', !dual);
+    fitBothLines();
+
+    paintPickCtx(prevEl, prevPrimary, prevSecondary, prev, !prefs || prefs.ctx >= 2);
+    paintPickCtx(nextEl, nextPrimary, nextSecondary, next, !prefs || prefs.ctx >= 1);
+    updatePickBadge();
+  }
+
+  function openPick() {
     const list = pickerSource();
     if (!Array.isArray(list) || list.length < 2) return false;
-    pickerList = list;
+    pickList = list;
     // 列表最后一项就是正在播的这句：从它开始往前翻
-    pickIndex = pickerList.length - 1;
+    pickIndex = pickList.length - 1;
     pickBaseIndex = pickIndex;
-    pickerOpen = true;
-    pickerEl.classList.add('open');
-    pickerEl.setAttribute('aria-hidden', 'false');
-    renderPicker();
+    pickAnchorIndex = pickIndex;
+    pickAnchorStart = liveStart();
+    pickAnchorSecondary = (lastPayload && lastPayload.cur && lastPayload.cur.secondary) || '';
+    picking = true;
+    // 换句排程停在手势上（PLAN 069）：到点把候选句滚走等于抢用户的手
+    clearSwapPlan();
+    resetGhost();
+    plateEl.getAnimations().forEach((anim) => anim.cancel());
+    // 空态会把字幕整块 visibility: hidden —— 选句期间得先把面板露出来
+    stageEl.classList.remove('empty');
+    stageEl.classList.add('picking');
+    pickBadge.classList.add('show');
+    paintPick();
     return true;
   }
 
-  function closePicker() {
-    pickerOpen = false;
-    pickerEl.classList.remove('open');
-    pickerEl.setAttribute('aria-hidden', 'true');
+  function closePick() {
+    picking = false;
+    stageEl.classList.remove('picking');
+    pickBadge.classList.remove('show');
     clearTimeout(pickTimer);
-  }
-
-  function commitPick() {
-    const item = pickerList[pickIndex];
-    if (item) sendControl('seek', Number(item[0]) || 0);
+    pickTimer = 0;
+    // 推送迟到 / 断流时不能把选句文本留在屏上：立刻回到上一次推送的画面
+    if (lastPayload) {
+      lastCurKey = '';
+      applyLineText(lastPayload.cur || {});
+      applyPrefs();
+      const live = lastPayload.cur || {};
+      stageEl.classList.toggle('empty', !(live.primary || '').trim());
+      // 屏上已经是这一句了：下一帧不该再为同一句滚一次（PLAN 069 的去重口径）
+      const start = Number(lastPayload.cue && lastPayload.cue.start);
+      shownCueStart = Number.isFinite(start) ? start : shownCueStart;
+    }
   }
 
   function onPickStart(ev) {
@@ -1322,8 +2034,8 @@ export function renderPage(room, bootPrefs) {
       pickBlocked = true;
       return;
     }
-    if (pickerOpen) {
-      // 浮层里继续换句：以当前选中为基准重新算
+    if (picking) {
+      // 选句进行中又落下第二根手指：以当前选中为基准重新算
       pickStartY = y;
       pickBaseIndex = pickIndex;
       pickTravel = 0;
@@ -1337,9 +2049,9 @@ export function renderPage(room, bootPrefs) {
     if (pickBlocked) return;
     if (!ev.touches || ev.touches.length !== 1) return;
     const dy = ev.touches[0].clientY - pickStartY;
-    if (!pickerOpen) {
+    if (!picking) {
       if (Math.abs(dy) < PICK_OPEN_PX) return;
-      if (!openPicker()) return;
+      if (!openPick()) return;
     }
     // 已经在选句：别让 iOS 把这次滑动当成页面回弹
     if (ev.cancelable) ev.preventDefault();
@@ -1347,11 +2059,11 @@ export function renderPage(room, bootPrefs) {
     // 上滑（dy < 0）= 往更早的句子走
     const next = Math.max(
       0,
-      Math.min(pickerList.length - 1, pickBaseIndex + Math.round(dy / PICK_ROW_PX)),
+      Math.min(pickList.length - 1, pickBaseIndex + Math.round(dy / PICK_ROW_PX)),
     );
     if (next !== pickIndex) {
       pickIndex = next;
-      renderPicker();
+      paintPick();
     }
   }
 
@@ -1360,16 +2072,18 @@ export function renderPage(room, bootPrefs) {
       pickBlocked = false;
       return;
     }
-    if (!pickerOpen) return;
-    // 只滑了一点点就松手：当误触，关掉不跳
+    if (!picking) return;
+    // 只滑了一点点就松手：当误触，收起高亮不跳
     if (Math.abs(pickTravel) < PICK_ROW_PX / 2) {
-      closePicker();
+      closePick();
       return;
     }
     clearTimeout(pickTimer);
+    // 留 300ms 让手指离开后仍能看到「选中的是哪句」，再跳过去
     pickTimer = setTimeout(() => {
-      commitPick();
-      closePicker();
+      const item = pickList[pickIndex];
+      if (item) sendControl('seek', Number(item[0]) || 0);
+      closePick();
     }, PICK_SEND_DELAY);
   }
 
@@ -1378,7 +2092,7 @@ export function renderPage(room, bootPrefs) {
   document.addEventListener('touchend', onPickEnd, { passive: true });
   document.addEventListener('touchcancel', () => {
     pickBlocked = false;
-    if (pickerOpen) closePicker();
+    if (picking) closePick();
   });
 
   // 旋转 / 地址栏收放 / 从竖屏启动后转横屏：iOS 的视口尺寸常常晚一两帧才稳定，
@@ -1456,6 +2170,9 @@ export function renderPage(room, bootPrefs) {
 
   // 进度动画必须自己起转：它只在 rAF 里递归续命，没人踢第一脚就永远不动
   requestAnimationFrame(paintProgress);
+  // 先测一次时钟差（PLAN 075），再按 30 秒的节奏复测；服务端没有 /ping 时自动退回
+  syncClock();
+  setInterval(syncClock, 30000);
   connect();
 })();
 </script>

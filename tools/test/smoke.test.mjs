@@ -3382,6 +3382,122 @@ test('手机字幕屏：分词默认打开，不跟视频内断句开关走（PL
   );
 });
 
+test('手机字幕屏：相邻句的译文晚到时，castLines 不能命中旧缓存（PLAN 066）', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+  const track = sandbox.__llgModTrack;
+  h.currentTime = 10;
+  show(h, 'あ', '');
+  h.currentTime = 12;
+  show(h, 'い', '');
+  await h.drain();
+
+  const before = pip.castLines();
+  assert.equal(before.prev ? before.prev.secondary : '', '', '上一句这时还没采到译文');
+
+  // 上一句的译文是播放到它之后才补进轨道的
+  const cues = track.getCues();
+  cues[0].secondary = '前一句的中文';
+  const after = pip.castLines();
+  assert.equal(after.prev.secondary, '前一句的中文', '译文补进来后要立刻反映在快照里');
+  assert.notEqual(before, after, '不能返回缓存里的旧对象');
+});
+
+/**
+ * PLAN 069：快照要带 `sentAt` 与未来句时间表 `plan`。
+ *
+ * 手机端靠这两项把换句排到本地时钟上；35-cast.js 不在主 harness 的模块表里
+ * （它要求 chrome + 控制栏 + 真 track），所以这里单独搭一套最小桩件，
+ * 只跑 `snapshot()` 这一条路径。
+ */
+test('手机字幕屏：快照带 sentAt 与未来句时间表（PLAN 069）', async () => {
+  const cues = [
+    { start: 0, end: 3, primary: 'あ', secondary: '' },
+    { start: 3, end: 6, primary: 'い', secondary: '中间这句' },
+    { start: 6, end: 9, primary: 'う', secondary: '' },
+    { start: 9, end: 12, primary: 'え', secondary: '' },
+  ];
+  // readyState 可改：PLAN 070 的快照要能表达「在播但画面放不动」
+  const videoState = {
+    currentTime: 3.2, duration: 100, paused: false, playbackRate: 1,
+    isConnected: true, readyState: 4,
+  };
+  const sandbox = {
+    console,
+    document: { querySelector: () => videoState },
+    chrome: {
+      storage: { local: { get: () => Promise.resolve({}), set: () => Promise.resolve() } },
+    },
+    requestAnimationFrame: () => 0,
+    cancelAnimationFrame: () => {},
+    setTimeout,
+    clearTimeout,
+    __llgModTrack: {
+      getCurrent: () => ({ ...cues[1], index: 1 }),
+      getCues: () => cues,
+      getProgressOrNull: () => 0.1,
+      // 前两句当骨架句，后面当采样句：PLAN 073 要能区分
+      isOfficialAt: (start) => start < 9,
+      subscribe: () => () => {},
+    },
+    __llgModPip: {
+      castLines: () => ({ primary: 'い', segments: [['い']], secondary: '', prev: null, next: null }),
+      official: () => ({}),
+      pipOption: () => ({}),
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(await sourceOf('35-cast.js'), sandbox, { filename: '35-cast.js' });
+
+  const snap = sandbox.__llgModCast.snapshot();
+  assert.ok(snap, '快照要有内容');
+  assert.equal(
+    Number.isFinite(snap.sentAt) && Math.abs(Date.now() - snap.sentAt) < 5000,
+    true,
+    'sentAt 是扩展侧的当前时刻，只给手机端估计排队延迟',
+  );
+  // 跨 realm：用 JSON 归一化后再比结构
+  // 当前句 + 未来两句：第 3 项留给「排程被跳过时还有下一步可排」
+  assert.deepEqual(JSON.parse(JSON.stringify(snap.plan)), [
+    { start: 3, end: 6, primary: 'い', secondary: '中间这句', official: true },
+    { start: 6, end: 9, primary: 'う', secondary: '', official: true },
+    { start: 9, end: 12, primary: 'え', secondary: '', official: false },
+  ]);
+  assert.equal(
+    snap.plan.some((item) => Object.prototype.hasOwnProperty.call(item, 'segments')),
+    false,
+    '排程只带文本与时间，不搬 segments（那是 cur 的职责）',
+  );
+
+  // PLAN 070：缓冲状态必须单列，否则手机端会以为画面在前进
+  assert.equal(snap.stalled, false, '正常播放时 not stalled');
+  videoState.readyState = 2;
+  assert.equal(sandbox.__llgModCast.snapshot().stalled, true, 'readyState < 3 视为缓冲');
+});
+
+test('手机字幕屏：扩展订阅 /commands 下行通道（PLAN 074）', async () => {
+  const source = await sourceOf('35-cast.js');
+  assert.ok(source.includes('function commandUrl()'), '命令通道地址');
+  assert.ok(source.includes('/commands?room='), '与服务端路由一致');
+  assert.ok(source.includes('new EventSource(commandUrl())'), '扩展侧长连');
+  assert.ok(source.includes('applyControls(data && data.controls)'),
+    '复用既有执行/去重逻辑，两条通道不会执行两次');
+  assert.ok(source.includes('function closeCommandStream()'), '关闭开关时断开');
+});
+
+test('手机字幕屏：静态块只在变化时下发，每帧只序列化一次（PLAN 071）', async () => {
+  const source = await sourceOf('35-cast.js');
+  assert.ok(source.includes('function staticOf(payload, key)'), '静态块按廉价指纹重建');
+  assert.ok(source.includes('function fnv1a(text)'), '版本号是可跨端复现的哈希');
+  assert.ok(source.includes('trackVer: staticVer'), '每帧都带版本，手机端据此认缓存');
+  assert.ok(source.includes('...(withStatic ? { static: block } : {})'), '只在变化时带静态块');
+  assert.equal(
+    source.includes('const dedupeKey = JSON.stringify'),
+    false,
+    '不再对整帧做第二次序列化',
+  );
+});
+
 test('手机字幕屏：同一句重复取快照不重复分词', async () => {
   const { sandbox, h } = await harness({ withPip: true });
   const pip = sandbox.__llgModPip;

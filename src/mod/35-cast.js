@@ -63,10 +63,20 @@
   };
 
   let state = { ...DEFAULT_STATE };
-  let seq = 0;
+  // 帧序号由服务端统一分配（它才是广播顺序的依据），扩展侧不再自带 seq
   let sent = 0;
   let failures = 0;
-  let lastBody = '';
+  /**
+   * 静态块（PLAN 071）：`cur/prev/next/cues/plan/style` 这些低频内容单独成块，
+   * 只在变化时随帧发一次，稳态每帧只剩播放头。
+   */
+  let staticBlock = null;
+  /** 静态块的版本（FNV-1a 32 位十六进制）；手机端按它认缓存 */
+  let staticVer = '';
+  /** 静态块是按哪个廉价指纹建的：指纹没变就不重建、不序列化 */
+  let staticKey = '';
+  /** 上一次成功发出去的静态版本（失败不前进，否则手机会永远缺这块） */
+  let sentStaticVer = '';
   /** 上一帧的廉价指纹（见 frameKey）：用来在 snapshot() 之前挡掉没变化的帧 */
   let lastFrameKey = '';
   let nextTryAt = 0;
@@ -152,6 +162,51 @@
   }
 
   /**
+   * 快照里带几件「未来」的句子（PLAN 069）。
+   *
+   * 手机端要把换句排到自己的时钟上，就必须在**下一句开始之前**知道它几时开始。
+   * 骨架（官方整条原文轨）已经把整条时间轴铺好了，所以这里几乎零成本。
+   * 只带两句：一句给排程，一句给「排程被跳过时还有下一步可排」的余量，
+   * 再多只是让 250ms 一帧的 JSON 变大。
+   */
+  const PLAN_AHEAD = 2;
+
+  /**
+   * 当前句及其后若干句的时间表：`[{ start, end, primary, secondary }, …]`。
+   *
+   * 与 `cueWindow()`（只往后看历史）方向相反：这里只给**当前句与未来**。
+   * 手机端拿 `[0]` 认当前句、`[1]` 当排程目标；取不到轨道时返回空数组，
+   * 手机端据此退回「实到帧驱动」（旧扩展同款行为）。
+   *
+   * `secondary` 照原样带：译文是播放后才采到的，常常为空，
+   * 手机端会按 PLAN 066 的规则先出原文、译文到达后补写，不重启动画。
+   */
+  function upcomingCues(current) {
+    const list = typeof track.getCues === 'function' ? track.getCues() : null;
+    const index = current && Number.isInteger(current.index) ? current.index : -1;
+    if (!list || index < 0) return [];
+
+    const out = [];
+    const last = Math.min(list.length - 1, index + PLAN_AHEAD);
+    for (let i = index; i <= last; i += 1) {
+      const cue = list[i];
+      const start = Number(cue && cue.start);
+      if (!Number.isFinite(start)) continue;
+      const end = Number(cue && cue.end);
+      out.push({
+        start,
+        // end 可能还没定稿（活跃句的 end 会被采样一路推着走）：交给手机端自己补
+        end: Number.isFinite(end) && end > start ? end : null,
+        primary: (cue && cue.primary) || '',
+        secondary: (cue && cue.secondary) || '',
+        // 官方骨架给的时间可信；采样句有 ±100ms 误差，手机端据此决定要不要提前起跑（PLAN 073）
+        official: typeof track.isOfficialAt === 'function' ? track.isOfficialAt(start) : false,
+      });
+    }
+    return out;
+  }
+
+  /**
    * 快照里的句内进度：**不可信时是 `null`**（时间轴与画面句还没对齐）。
    *
    * 不能退回 0：手机端拿它当句内时钟的基准，0 意味着「这句从头开始」，
@@ -193,7 +248,21 @@
       v: 1,
       // 房间号由 URL 决定；带在体里只为诊断（服务端不读它）
       room: state.room,
+      /**
+       * 扩展侧发出这一帧的时刻（PLAN 069）。手机端只用它估计「帧在网络上排了多久」，
+       * 据此把取样时刻还原回去；两台机器的时钟差由手机端取最小样本吸收，不做对时。
+       *
+       * ⚠️ 绝不能进 `frameKey()`：它每帧都变，进了指纹就等于「暂停时也每 250ms 全量发帧」。
+       */
+      sentAt: Date.now(),
       playing: !!(v && !v.paused && !v.ended),
+      /**
+       * 在播但画面放不动（PLAN 070）：`readyState < HAVE_FUTURE_DATA` 就是缓冲中。
+       *
+       * 手机端所有时钟都靠 `playing` 推进，缓冲时它仍是 true —— 不单列这个状态，
+       * 手机就会在转圈期间把字幕滚到下一句，缓冲结束再滚回来。
+       */
+      stalled: !!v && v.readyState < 3,
       // 倍速：手机控制条用它回显（Mac 上改了倍速，手机上也要跟着变）
       rate: v ? Number(v.playbackRate) || 1 : 1,
       // 整片进度：手机底部那条白条与浮窗的 #progress 是同一个东西
@@ -213,6 +282,8 @@
       next: lines.next || null,
       // 手机选句浮层的候选（PLAN 045）：当前句往前 40 句
       cues: cueWindow(current),
+      // 换句排程的时间表（PLAN 069）：当前句与未来两句，手机端据此在本地时钟上起跑
+      plan: upcomingCues(current),
       style: {
         style: official.subtitleStyle || 'classic',
         scale: Number(official.subtitleScale) || 100,
@@ -256,12 +327,19 @@
     const progress = progressOf();
     const jaBreak = globalThis.__llgModJaBreak;
     const v = video();
+    // 相邻句的译文是播放到它之后才补进轨道的：暂停时 currentTime 不动，
+    // 不把这两个字段算进指纹，手机上的上下句中文会一直停在「只有原文」（PLAN 066）
+    const cues = track && typeof track.getCues === 'function' ? track.getCues() : null;
+    const prevCue = cues && current && current.index != null ? cues[current.index - 1] : null;
+    const nextCue = cues && current && current.index != null ? cues[current.index + 1] : null;
 
     return [
       current ? current.index : -1,
       current ? Number(current.start) : -1,
       lines ? lines.primary : '',
       lines ? lines.secondary : '',
+      prevCue && prevCue.secondary ? prevCue.secondary : '',
+      nextCue && nextCue.secondary ? nextCue.secondary : '',
       (jaBreak && jaBreak.SEPARATOR) || '|',
       // 断句开关一变，同一句的 segments 就不同（纯文本一段 vs 按文节切）
       jaBreak && typeof jaBreak.isEnabled === 'function' && jaBreak.isEnabled() ? 1 : 0,
@@ -273,6 +351,8 @@
       official.nativeLanguage,
       own.ctxLines,
       v ? (v.paused ? 1 : 0) : 0,
+      // 缓冲开始/结束各要推一拍（PLAN 070）：不进指纹的话这次状态变化会被去重掉
+      v && v.readyState < 3 ? 1 : 0,
       v ? Number(v.playbackRate) || 1 : 1,
       v && Number.isFinite(v.duration) && v.duration > 0 ? Math.round(v.currentTime * 2) : 0,
       // null（不可信）与 0（句首）必须是两个不同的键，否则换句那一拍会被去重掉
@@ -284,6 +364,40 @@
 
   function pushUrl() {
     return `${state.endpoint}/push?room=${encodeURIComponent(state.room)}`;
+  }
+
+  /** 扩展订阅的下行通道（PLAN 074）：手机命令按下即达，不再等下一拍 /push 回程 */
+  function commandUrl() {
+    return `${state.endpoint}/commands?room=${encodeURIComponent(state.room)}`;
+  }
+
+  /** `/commands` 的 EventSource：断线由它自己按 retry 重连 */
+  let cmdSource = null;
+
+  function openCommandStream() {
+    closeCommandStream();
+    if (typeof EventSource !== 'function') return;
+    try {
+      cmdSource = new EventSource(commandUrl());
+    } catch {
+      cmdSource = null;
+      return;
+    }
+    cmdSource.addEventListener('message', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        // 复用既有执行/去重逻辑：同一个 cid 从两条路径到达都不会执行两次
+        applyControls(data && data.controls);
+      } catch {
+        // 不是 JSON（心跳 / 旧服务端）：忽略
+      }
+    });
+  }
+
+  function closeCommandStream() {
+    if (!cmdSource) return;
+    cmdSource.close();
+    cmdSource = null;
   }
 
   /**
@@ -418,6 +532,97 @@
     }
   }
 
+  /** FNV-1a 32 位：给静态块取一个跨端一致的短版本号（PLAN 071） */
+  function fnv1a(text) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  }
+
+  /**
+   * 取静态块（PLAN 071）。
+   *
+   * 只在 `frameKey()` 变化时重建并序列化：这个指纹已经覆盖了当前句、上下文、样式与
+   * 分隔符，静态块不会漏更新。稳态（同一句继续播）下这里一次 `JSON.stringify` 都不做。
+   */
+  function staticOf(payload, key) {
+    if (key === staticKey && staticBlock) return staticBlock;
+    staticKey = key;
+    staticBlock = {
+      cur: payload.cur,
+      prev: payload.prev,
+      next: payload.next,
+      cues: payload.cues,
+      plan: payload.plan,
+      style: payload.style,
+    };
+    staticVer = fnv1a(JSON.stringify(staticBlock));
+    return staticBlock;
+  }
+
+  /** 整条轨的分块大小（PLAN 072）：200 句约 10–14KB，远低于服务端 64KB 上限 */
+  const TRACK_CHUNK = 200;
+  /** 轨道下发进度：`sentTo` 只在发送成功后前进，失败的那一块下一拍重来 */
+  let trackState = { ver: '', id: '', total: 0, sentTo: 0 };
+
+  /** 当前视频 id：只用于让手机端区分「换了视频」，取不到就空串 */
+  function videoId() {
+    try {
+      return new URL(location.href).searchParams.get('v') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 轨道指纹：句数 + 首尾句起点。
+   *
+   * 用这个而不是完整内容哈希：拿到全量轨道时不必为算版本再序列化一遍；
+   * 断句变化（官方轨晚到、视频内切轨）几乎必然改变句数或首尾起点。
+   */
+  function trackVerOf(cues, id) {
+    const first = cues[0] || {};
+    const last = cues[cues.length - 1] || {};
+    return fnv1a(`${id}|${cues.length}|${Number(first.start) || 0}|${Number(last.start) || 0}`);
+  }
+
+  /**
+   * 取下一块整条轨（PLAN 072）。
+   *
+   * 手机端拿到完整轨道后，即使推送中断也能继续按本地时钟换句；
+   * 没有它的话，断流一超过 `plan` 覆盖的两句就停在最后一句上不动。
+   * 发完返回 null（轨道没变时不会再占带宽）。
+   */
+  function nextTrackChunk() {
+    const cues = track && typeof track.getCues === 'function' ? track.getCues() : null;
+    if (!cues || !cues.length) return null;
+
+    const id = videoId();
+    const ver = trackVerOf(cues, id);
+    if (ver !== trackState.ver) trackState = { ver, id, total: cues.length, sentTo: 0 };
+    if (trackState.sentTo >= cues.length) return null;
+
+    const from = trackState.sentTo;
+    const to = Math.min(cues.length, from + TRACK_CHUNK);
+    const chunk = [];
+    for (let i = from; i < to; i += 1) {
+      const cue = cues[i];
+      const start = Number(cue && cue.start);
+      if (!Number.isFinite(start)) continue;
+      const end = Number(cue && cue.end);
+      chunk.push([
+        start,
+        Number.isFinite(end) && end > start ? end : null,
+        (cue && cue.primary) || '',
+        (cue && cue.secondary) || '',
+      ]);
+    }
+    return { ver, id, from, to, total: cues.length, cues: chunk };
+  }
+
   /**
    * 发一帧。
    * @param {boolean} force true = 忽略去重（刚打开开关时用）
@@ -433,12 +638,30 @@
     const payload = snapshot();
     if (!payload) return;
 
-    // ack：告诉服务端「我已经执行到这条了」；它据此清掉队列
-    const body = JSON.stringify({ ...payload, seq: (seq += 1), ack: lastCid });
-    const dedupeKey = JSON.stringify({ ...payload, seq: undefined });
-    // 暂停时同一句会被 rAF 反复取到：内容没变就不发（AGENTS.md §3 幂等）。
-    // 但最多 1 秒要发一次空的 —— 那是手机命令的回程通道（见 CONTROL_POLL_MS）。
-    if (!force && dedupeKey === lastBody && Date.now() - lastAttemptAt < CONTROL_POLL_MS) return;
+    // 静态块按需重建（PLAN 071）；`static` 只在版本变化时随帧下发
+    const block = staticOf(payload, key);
+    const withStatic = staticVer !== sentStaticVer;
+    // 整条轨分块下发（PLAN 072）：一块一拍，发完为止
+    const trackChunk = nextTrackChunk();
+    // 动态块就是整帧去掉静态字段：稳态下只有几十字节
+    const body = JSON.stringify({
+      v: payload.v,
+      room: payload.room,
+      sentAt: payload.sentAt,
+      playing: payload.playing,
+      stalled: payload.stalled,
+      rate: payload.rate,
+      timeline: payload.timeline,
+      cue: payload.cue,
+      progress: payload.progress,
+      trackVer: staticVer,
+      ...(withStatic ? { static: block } : {}),
+      ...(trackChunk ? { track: trackChunk } : {}),
+      // ack：告诉服务端「我已经执行到这条了」；它据此清掉队列
+      ack: lastCid,
+    });
+    // 暂停时同一句会被 rAF 反复取到：`frameKey()` 那一道已经挡掉（AGENTS.md §3 幂等），
+    // 这里不再对整帧做第二次序列化比较 —— 一次 stringify 的产物就是发出去的 body。
 
     inflight = true;
     lastAttemptAt = Date.now();
@@ -449,7 +672,9 @@
       if (failures) console.info('[手机字幕屏] 已恢复推送');
       failures = 0;
       nextTryAt = 0;
-      lastBody = dedupeKey;
+      sentStaticVer = staticVer;
+      // 这一块真的发出去了才推进进度；失败时下一拍重发同一块
+      if (trackChunk) trackState.sentTo = trackChunk.to;
       lastFrameKey = key;
       lastError = '';
       sent += 1;
@@ -494,15 +719,18 @@
 
   function start() {
     if (rafId) return;
-    lastBody = '';
+    // 开关被关掉再打开：手机端可能已经换了页面，静态块要重发一次
+    sentStaticVer = '';
     failures = 0;
     nextTryAt = 0;
     lastPushAt = 0;
     rafId = requestAnimationFrame(loop);
+    openCommandStream();
     push(true);
   }
 
   function stop() {
+    closeCommandStream();
     if (rafId) {
       cancelAnimationFrame(rafId);
       rafId = 0;
@@ -679,8 +907,9 @@
         saveState();
         return { ...state };
       },
-      stats: () => ({ sent, failures, lastBody, lastError, lastAttemptAt }),
+      stats: () => ({ sent, failures, lastError, lastAttemptAt, staticVer, commandStream: !!cmdSource }),
       pushUrl,
+      commandUrl,
     },
     configurable: true,
   });

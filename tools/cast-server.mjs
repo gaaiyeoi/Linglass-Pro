@@ -77,6 +77,13 @@ function roomOf(name) {
 
   room = {
     snapshot: null,
+    // 静态块（PLAN 071）：只在变化时随帧来，这里替新接入的手机保存一份
+    static: null,
+    staticVer: '',
+    // 整条轨（PLAN 072）：分块来的，攒齐后供新接入的手机一次性补齐
+    track: null,
+    // 扩展订阅的命令通道（PLAN 074）
+    cmdClients: new Set(),
     clients: new Set(),
     prefs: null,
     // 手机发来的播放命令（等待扩展在下一次 /push 里取走并 ack）
@@ -111,6 +118,30 @@ function sanitizePrefs(raw) {
     dual: value.dual !== false,
     bar: value.bar !== false,
   };
+}
+
+/**
+ * 把一块轨道拼进房间的整轨缓存（PLAN 072）。
+ *
+ * 扩展按 200 句一块发；这里按 `ver` 累积。版本变了（换视频 / 官方轨晚到）就整份作废，
+ * 不做跨版本的拼接 —— 混着拼出来的时间轴比没有更糟。
+ */
+function mergeTrackChunk(store, chunk) {
+  const total = Math.max(0, Math.min(20000, Number(chunk.total) || 0));
+  const from = Math.max(0, Number(chunk.from) || 0);
+  const cues = Array.isArray(chunk.cues) ? chunk.cues : [];
+  const ver = String(chunk.ver || '');
+  const same = store && store.ver === ver && store.total === total;
+  const next = same ? store : { ver, total, cues: [] };
+
+  for (let i = 0; i < cues.length; i += 1) {
+    const at = from + i;
+    if (at >= 0 && at < total && cues[i]) next.cues[at] = cues[i];
+  }
+  let got = 0;
+  for (let i = 0; i < next.total; i += 1) if (next.cues[i]) got += 1;
+  next.got = got;
+  return next;
 }
 
 /**
@@ -214,6 +245,50 @@ function handleStream(req, res, url) {
   });
 }
 
+/**
+ * 扩展订阅的下行命令通道（PLAN 074）。
+ *
+ * 命令原本只能搭 `/push` 的响应回程：暂停时内容不变，扩展一拍最多 1 秒才空推一次
+ * （CONTROL_POLL_MS），手机上点「播放」要等一秒才生效。这里给扩展一条 SSE，
+ * 手机按下即达；`pending` 队列与 ack 语义保持不变，作为丢包兜底。
+ */
+function handleCommands(req, res, url) {
+  const room = roomOf(url.searchParams.get('room'));
+
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  res.write('retry: 1000\n\n');
+  // 重连时把还没 ack 的命令补一遍：两条通道都可能丢一拍
+  if (room.pending.length) sendEvent(res, { controls: room.pending });
+
+  room.cmdClients.add(res);
+  console.log(`[cast] 扩展接入命令通道（room=${url.searchParams.get('room') || 'demo'}），当前 ${room.cmdClients.size} 条`);
+
+  const ping = setInterval(() => {
+    if (!res.__llgBackpressure) res.write(': ping\n\n');
+  }, PING_MS);
+  req.on('close', () => {
+    clearInterval(ping);
+    room.cmdClients.delete(res);
+  });
+}
+
+/** 把一条命令立刻推给订阅中的扩展（PLAN 074） */
+function broadcastControl(room, cmd) {
+  const payload = { controls: [cmd] };
+  for (const res of room.cmdClients) {
+    try {
+      sendEvent(res, payload);
+    } catch {
+      room.cmdClients.delete(res);
+    }
+  }
+}
+
 async function handlePush(req, res, url) {
   const text = await readBody(req);
   let payload;
@@ -226,8 +301,32 @@ async function handlePush(req, res, url) {
   }
 
   const room = roomOf(url.searchParams.get('room') || payload.room);
+  // 静态块只在变化时来（PLAN 071）：丢掉了的话新接入的手机就只剩播放头，没有字幕
+  if (payload.static && typeof payload.static === 'object') {
+    room.static = payload.static;
+    room.staticVer = String(payload.trackVer || '');
+  }
+  // 整条轨（PLAN 072）：分块累积，供新接入的手机补齐；已连上的照常转发这一块
+  if (payload.track && typeof payload.track === 'object') {
+    room.track = mergeTrackChunk(room.track, payload.track);
+  }
   const next = { ...payload, v: 1, seq: (seq += 1), at: Date.now() };
-  room.snapshot = next;
+  // room.snapshot 是「新客户端接入时补发的那一帧」：静态块与整轨都要补上
+  room.snapshot = { ...next };
+  if (room.static && !next.static) {
+    room.snapshot.static = room.static;
+    room.snapshot.trackVer = room.staticVer;
+  }
+  if (room.track && !next.track) {
+    room.snapshot.track = {
+      ver: room.track.ver,
+      from: 0,
+      to: room.track.got,
+      total: room.track.total,
+      cues: room.track.cues.slice(),
+    };
+  }
+  // 已连上的客户端自己缓存静态块：动态帧就按原样发，省带宽
   broadcast(room, next);
 
   // 扩展在下一次 /push 里带回它已经执行到哪一条，据此清掉队列。
@@ -271,6 +370,8 @@ async function handleControl(req, res, url) {
   room.cmdSeq += 1;
   const queued = { cid: room.cmdSeq, ...cmd };
   enqueueControl(room.pending, queued);
+  // 有扩展在订阅命令通道就立刻给它（PLAN 074）；没订阅时仍靠 /push 回程
+  broadcastControl(room, queued);
 
   res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({ ok: true, cid: queued.cid }));
@@ -358,6 +459,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/commands') {
+    handleCommands(req, res, url);
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/push') {
     try {
       await handlePush(req, res, url);
@@ -375,6 +481,16 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8' });
       res.end(err.message);
     }
+    return;
+  }
+
+  // 手机端测时钟差用（PLAN 075）：只回一个时间戳，不做任何副作用
+  if (req.method === 'GET' && url.pathname === '/ping') {
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+    res.end(JSON.stringify({ ok: true, at: Date.now() }));
     return;
   }
 
