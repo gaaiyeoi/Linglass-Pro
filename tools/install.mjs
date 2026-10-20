@@ -1,20 +1,17 @@
 #!/usr/bin/env node
 /**
- * 一键安装器（面向非技术用户）
+ * 安装脚本
  *
  * 由发布包根目录的 install-macos.command / install-windows.bat 调用，
- * 手工在终端里跑也行：node tools/install.mjs
+ * 也可以在终端中直接执行：node tools/install.mjs
  *
- * 做三件事：
- *   1. 从 Chrome 商店下载官方基线到 vendor/（用户本机自己拉，发布包不含官方代码）
- *   2. 调 build.mjs 把 src/mod/ 叠加成 dist/
- *   3. 打开浏览器扩展管理页 + 在文件管理器里高亮 dist/，并弹出自包含的图文向导
+ * 执行流程：
+ *   1. 从 Chrome 商店下载 Linglass 当前版本到 vendor/
+ *   2. 调用 build.mjs 将 src/mod/ 合并为 dist/
+ *   3. 打开浏览器扩展管理页，在文件管理器中定位 dist/，并打开图文向导
  *
- * 之后的「开启开发者模式 → 加载已解压的扩展程序 → 选 dist/」是 Chrome 的安全边界，
- * 没有任何脚本能代劳 —— 所以最后一步必须由人来点，向导里写清了点哪里。
- *
- * 注意：本文件被 import 时不会执行任何动作（见文件末尾的守卫），
- * 因为 tools/test/install.test.mjs 要单独测下面的 browserCandidates()。
+ * 「启用开发者模式 → 加载已解压的扩展程序 → 选择 dist/」需要在浏览器中手动完成。
+ * 本文件被 import 时不执行任何操作，以便测试 browserCandidates()。
  */
 import { spawn } from 'node:child_process';
 import { access, readFile } from 'node:fs/promises';
@@ -24,10 +21,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** 低于这个版本跑不了 node:test / 全局 fetch / zlib 用法 */
+/** 运行所需的最低 Node.js 版本 */
 const REQUIRED_NODE_MAJOR = 18;
 
-/** 发布包必须齐备的文件（缺了说明用户跑错了目录，或者包解漏了） */
+/** 发布包必须包含的文件；缺失表示目录不正确或包未完整解压 */
 const PACKAGE_ENTRIES = ['build.mjs', 'src/mod', 'tools/import-vendor.mjs'];
 
 const GUIDE = path.join('docs', 'install-guide.html');
@@ -38,15 +35,14 @@ function log(msg) {
 }
 
 function fail(msg) {
-  console.error(`\n[install] ✖ ${msg}\n`);
+  console.error(`\n[install] 错误：${msg}\n`);
   process.exit(1);
 }
 
 /**
  * 候选浏览器，按探测优先级排列。
  *
- * 纯数据（不碰文件系统），路径交给 pickBrowser() 里的 existsSync 过滤 ——
- * 这样这张表在任意平台上都能被单测断言，不需要真装五个浏览器。
+ * 该函数只返回数据，不访问文件系统；路径是否存在由 pickBrowser() 检查。
  */
 export function browserCandidates(platform, env = process.env) {
   if (platform === 'darwin') {
@@ -60,8 +56,7 @@ export function browserCandidates(platform, env = process.env) {
   }
 
   if (platform === 'win32') {
-    // 显式用 win32 分隔符：这张表在任意平台上取用时都该是 Windows 路径，
-    // 否则在 macOS 上跑单测会拼出 `C:\Program Files/Google/…` 这种混合串
+    // 使用 win32 分隔符，保证在任意平台上返回的路径格式一致
     const win = path.win32.join;
     const pf = env.ProgramFiles ?? 'C:\\Program Files';
     const pf86 = env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
@@ -95,7 +90,7 @@ export function browserCandidates(platform, env = process.env) {
     ];
   }
 
-  // Linux：不猜测安装路径，交给 PATH 里的命令名（探测失败就只提示用户手动打开）
+  // Linux 不猜测安装路径，使用 PATH 中的命令名
   return [
     { name: 'Google Chrome', app: 'google-chrome', url: 'chrome://extensions', viaPath: true },
     { name: 'Chromium', app: 'chromium', url: 'chrome://extensions', viaPath: true },
@@ -104,7 +99,7 @@ export function browserCandidates(platform, env = process.env) {
   ];
 }
 
-/** 挑第一个真的装了的浏览器；一个都没找到返回 null（不报错，由调用方降级提示） */
+/** 返回第一个已安装的浏览器；未找到时返回 null */
 function pickBrowser() {
   for (const candidate of browserCandidates(process.platform)) {
     if (candidate.viaPath) return candidate;
@@ -122,7 +117,7 @@ function openBrowser(candidate) {
   spawn(candidate.app, [candidate.url], { detached: true, stdio: 'ignore' }).unref();
 }
 
-/** 在系统文件管理器里高亮 dist/，省得用户自己去翻「下载」目录 */
+/** 在系统文件管理器中定位 dist/ */
 function revealDir(dir) {
   if (process.platform === 'darwin') {
     spawn('open', ['-R', dir], { stdio: 'ignore' }).unref();
@@ -150,7 +145,7 @@ function openFile(file) {
 
 /** 跑一个子脚本，日志直接透传到用户眼前；失败即抛 */
 function runStep(label, script, args) {
-  log(`▶ ${label}`);
+  log(`执行：${label}`);
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], { cwd: ROOT, stdio: 'inherit' });
     child.on('error', reject);
@@ -172,61 +167,61 @@ async function checkPackageLayout() {
   }
   if (missing.length) {
     fail(
-      `这个目录不像安装包（少了 ${missing.join('、')}）。\n` +
-      `        请先完整解压下载的压缩包，再双击里面的安装文件。\n` +
+      `当前目录不是完整的安装包，缺少：${missing.join('、')}。\n` +
+      `        请先完整解压下载的压缩包，再双击其中的安装文件。\n` +
       `        当前目录：${ROOT}`,
     );
   }
 }
 
 function printNextSteps(browserName) {
-  const label = browserName ?? '你的浏览器';
+  const label = browserName ?? '浏览器';
   console.log(`
 ------------------------------------------------------------
- 还差 4 下点击（Chrome 不允许任何程序替你做这步）：
+ 还差 4 步，需要在浏览器中手动完成：
 
-   1. 在打开的 ${label} 里，点右上角「开发者模式」开关
-   2. 点左上角「加载已解压的扩展程序」
-   3. 选这个文件夹：${DIST}
-      （我已经在文件管理器里帮你选中它了）
-   4. 看到 Linglass-Pro 出现，去 YouTube 打开任意带字幕的视频
+   1. 在 ${label} 中启用右上角「开发者模式」
+   2. 点击左上角「加载已解压的扩展程序」
+   3. 选择以下目录：${DIST}
+      该目录已在文件管理器中选中
+   4. 确认 Linglass-Pro 出现在扩展列表，然后在 YouTube 打开任意带字幕的视频
 
- 详细图文（含截图说明）已经用浏览器打开了：${GUIDE}
- 装完想删掉：在扩展管理页点「移除」即可，不留残留。
+ 图文说明已在浏览器中打开：${GUIDE}
+ 卸载：在扩展管理页点击「移除」，随后删除安装目录。
 ------------------------------------------------------------
 `);
 }
 
 async function main() {
   console.log('');
-  log('Linglass-Pro 一键安装');
+  log('Linglass-Pro 安装');
   log(`目录    ${ROOT}`);
   log(`Node    ${process.version}`);
   console.log('');
 
   if (Number(process.versions.node.split('.')[0]) < REQUIRED_NODE_MAJOR) {
-    fail(`需要 Node.js ${REQUIRED_NODE_MAJOR} 或更新版本，当前是 ${process.version}。请到 nodejs.org 装新版本后再双击一次。`);
+    fail(`需要 Node.js ${REQUIRED_NODE_MAJOR} 或更新版本，当前版本为 ${process.version}。请安装新版本后重新运行安装文件。`);
   }
 
   await checkPackageLayout();
 
   try {
-    log('第 1 / 3 步：从 Chrome 商店下载官方基线（本机自己拉，安装包里不含官方代码）');
+    log('第 1 / 3 步：从 Chrome 商店获取 Linglass 当前版本');
     console.log('');
-    await runStep('下载官方基线', 'tools/import-vendor.mjs', ['--download']);
+    await runStep('获取 Linglass 基线', 'tools/import-vendor.mjs', ['--download']);
 
     console.log('');
-    log('第 2 / 3 步：叠加本项目的改造，生成 dist/');
+    log('第 2 / 3 步：与 src/mod/ 合并，生成 dist/');
     console.log('');
     await runStep('构建 dist/', 'build.mjs', []);
 
     console.log('');
-    log('第 3 / 3 步：打开该打开的页面');
+    log('第 3 / 3 步：打开扩展管理页与图文向导');
   } catch (err) {
     fail(
       `${err.message}\n` +
-      '        常见原因：网络不通（第 1 步要联网）、磁盘空间不足、或者杀毒软件拦了写入。\n' +
-      `        重试：再双击一次安装文件即可，已下载的部分会跳过。`,
+      '        可能原因：网络不可用、磁盘空间不足，或写入被安全软件拦截。\n' +
+      `        可重新运行安装文件重试，已下载的部分会跳过。`,
     );
   }
 

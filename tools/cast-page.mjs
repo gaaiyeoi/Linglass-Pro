@@ -189,7 +189,7 @@ export function renderPage(room, bootPrefs) {
     z-index: 21;
   }
   #progress.off { display: none; }
-  /* ⚠️ 这里是 <i>，默认 display:inline —— 行内元素的 width/height/transform 全部不生效，
+  /* 这里是 <i>，默认 display:inline —— 行内元素的 width/height/transform 全部不生效，
      从 PLAN 038 起那条白条就一直没被画出来过（PLAN 045 定位到）。必须块级化。 */
   #progress-fill {
     display: block; position: absolute; inset: 0;
@@ -588,7 +588,7 @@ export function renderPage(room, bootPrefs) {
   function plateCss(spec, base) {
     if (spec.plate === 'block') {
       const scale = base / BASE_FONT_PX;
-      // ⚠️ 这里**不要**抄桌面浮窗的背景模糊（PLAN 041）。
+      // 这里不要照搬桌面浮窗的背景模糊。
       // 手机页的背景是纯色 #141518，模糊一层纯色在视觉上与不模糊完全一致；
       // 但 iOS Safari 会把带背景模糊的子树排除在独立合成层之外，
       // 里面的 .kfill（句内进度）每帧 scaleX 都要重栅格化整块底板 → 明显掉帧。

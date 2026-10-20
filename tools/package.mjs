@@ -4,19 +4,18 @@
  *
  *   node tools/package.mjs
  *
- * 产出一个包到 release/（文件名里的版本号读作「官方基线 + 我们的补丁」，
- * 例如 1.12.4.900 = 官方 1.12.4 上叠第 900 号补丁）：
+ * 产出一个包到 release/（文件名里的版本号读作「基线版本 + patch 位」，
+ * 例如 1.12.4.900 = Linglass 1.12.4 加 patch 900）：
  *
- *   Linglass-Pro-<版本>-installer.zip   只有我们的代码 + 安装器 + 向导。
- *                                       对方要先装 Node，双击后由他本机从商店拉官方基线，
- *                                       再把 src/mod 叠加到本机产物上。
+ *   Linglass-Pro-<版本>-installer.zip   本项目源码 + 安装脚本 + 图文向导。
+ *                                       安装时需要 Node.js：脚本在本机从 Chrome 商店
+ *                                       获取 Linglass 当前版本，再把 src/mod 合并进去。
  *
- * 不产出含官方代码的完整包：仓库与 release 只放我们自己的代码。
- * 纯代码包的自检禁止出现 vendor/ 与 dist/（见 assertNoOfficialCode）。
+ * 发布包不含 vendor/ 与 dist/（见 assertNoOfficialCode）。
  *
  * 版本号取自 dist/manifest.json，所以要先 `make build`（Makefile 里 package 依赖 build）。
  * 注意 build.mjs 把 patch 固定为 900（避免和商店更新撞号），于是 1.12.3 与 1.12.4
- * 的产物版本号都是 1.12.900 —— 所以文件名必须补上官方基线的 patch 才分辨得出来。
+ * 的产物版本号都是 1.12.900 —— 所以文件名必须补上基线 patch 才分辨得出来。
  */
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -32,7 +31,7 @@ const DIST_DIR = path.join(ROOT, 'dist');
 /** dist/manifest.json 里 patch 位的固定值（与 build.mjs 的 MOD_PATCH 对应） */
 const MOD_PATCH_FALLBACK = '900';
 
-/** 纯代码包的白名单：只有这里列出的（以及 src/mod/ 下的 .js）会被打进去 */
+/** 发布包的白名单：只有这里列出的（以及 src/mod/ 下的 .js）会被打进去 */
 const INSTALLER_FILES = [
   'install-macos.command',
   'install-windows.bat',
@@ -46,7 +45,7 @@ const INSTALLER_FILES = [
 /** 必须是可执行的（双击安装靠它，zip 的权限位很容易在打包环节悄悄丢掉） */
 const EXECUTABLE = new Set(['install-macos.command']);
 
-/** 纯代码包里一旦出现这些前缀就是合规事故（完整包不受这条约束） */
+/** 发布包里一旦出现这些前缀就是打包错误（完整包不受这条约束） */
 const INSTALLER_FORBIDDEN = ['vendor/', 'dist/', 'release/'];
 
 /** 完整包里向导的落点：ASCII 文件名，中文名在部分解压工具上会乱码 */
@@ -59,10 +58,10 @@ function log(msg) {
 }
 
 /**
- * 包的可读版本号：`<major>.<minor>.<官方 patch>.<我们的 patch>`。
+ * 包的可读版本号：`<major>.<minor>.<基线 patch>.<patch 位>`。
  *
- * 为什么不能直接用 manifest 里的 `1.12.900`：官方一发小版本（1.12.3 → 1.12.4），
- * 产物版本号不变（major/minor 没动，patch 恒为 900），两个包会同名同号，
+ * 为什么不能直接用 manifest 里的 `1.12.900`：Linglass 一发小版本（1.12.3 → 1.12.4），
+ * 产物版本号不变（major/minor 没动，patch 恒为 900），两次构建会同名同号，
  * 用户分不清手里是哪一个。
  */
 export function readableVersion(baseVersion, manifestVersion) {
@@ -90,7 +89,7 @@ export function archiveRootName(baseVersion, manifestVersion) {
 /**
  * 打包。ctx 全是**已经读好的数据**（不碰文件系统），这样单测能喂假数据。
  *
- *   ctx.baseVersion      官方基线版本，如 '1.12.4'
+ *   ctx.baseVersion      Linglass 基线版本，如 '1.12.4'
  *   ctx.manifestVersion  dist/manifest.json 里的版本，如 '1.12.900'
  *   ctx.installerFiles   [{ name, data, mode }]，项目根相对路径
  *   ctx.extensionFiles   [{ name, data, mode }]，dist 相对路径
@@ -115,7 +114,7 @@ function buildExtensionArchive(ctx) {
   return writeZip(entries);
 }
 
-/** 纯代码包自检：混进官方代码或构建产物直接失败 */
+/** 发布包自检：混进 vendor/ 或构建产物直接失败 */
 export function assertNoOfficialCode(zip) {
   const packed = readZip(zip);
   const leaked = packed.filter((entry) =>
@@ -139,7 +138,7 @@ export function assertExtensionLayout(zip, rootName) {
     throw new Error('完整包里找不到内嵌层根上的 manifest.json，加载扩展会失败');
   }
   if (!packed.some((entry) => entry.name === `${prefix}mod/00-shared.js`)) {
-    throw new Error('完整包里缺 mod/ 脚本 —— 这不是我们的产物');
+    throw new Error('完整包里缺 mod/ 脚本 —— 产物不完整');
   }
   const installerBait = packed.find((entry) => entry.name.endsWith('install-macos.command'));
   if (installerBait) {
@@ -200,7 +199,7 @@ async function main() {
   const version = readableVersion(baseVersion, manifestVersion);
   log(`基线      vendor/linglass-${baseVersion}（文件名里的 ${version}）`);
 
-  // 纯代码包：白名单 + src/mod 下全部非 dev 脚本
+  // 发布包：白名单 + src/mod 下全部非 dev 脚本
   const modFiles = await listFiles(
     path.join(ROOT, 'src', 'mod'),
     '',
@@ -216,7 +215,7 @@ async function main() {
   const installerPacked = assertNoOfficialCode(installerZip);
   for (const name of INSTALLER_FILES) {
     if (!installerPacked.some((entry) => entry.name === name)) {
-      throw new Error(`纯代码包里缺少 ${name}`);
+      throw new Error(`发布包里缺少 ${name}`);
     }
   }
   if (installerPacked.find((e) => e.name === 'install-macos.command').mode !== 0o755) {
@@ -230,12 +229,12 @@ async function main() {
   const abs = path.join(RELEASE_DIR, name);
   await writeFile(abs, installerZip);
   const size = `${(installerZip.length / 1024 / 1024).toFixed(2)} MB`;
-  log(`纯代码包  ${path.relative(ROOT, abs)}`);
-  log(`          ${installerPacked.length} 个文件 / ${size} / 只有我们的代码，需装 Node`);
+  log(`发布包    ${path.relative(ROOT, abs)}`);
+  log(`          ${installerPacked.length} 个文件 / ${size} / 仅含本项目源码，需装 Node`);
 
   console.log('');
-  log('对方要先装 Node，再双击里面的安装文件');
-  log('安装时由他本机从商店拉官方基线，再把本项目改动叠加进去');
+  log('安装前先装 Node，再双击解压目录里的安装文件');
+  log('安装时由本机从 Chrome 商店获取 Linglass 当前版本，再与本项目源码合并');
 }
 
 /** 只在被直接执行时跑 main（被 import 时什么都不做，方便单测构包函数） */

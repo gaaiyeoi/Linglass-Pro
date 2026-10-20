@@ -2,8 +2,8 @@
 /**
  * Linglass-Pro 构建脚本
  *
- *   vendor/linglass-<version>/   原始扩展（只读基线，永不修改）
- *   src/mod/                     我们的增量代码
+ *   vendor/linglass-<version>/   Linglass 商店版本（只读基线，不做修改）
+ *   src/mod/                     扩展源码
  *          ↓
  *   dist/                        可加载的完整扩展
  *
@@ -28,12 +28,12 @@ const SRC_MOD = path.join(ROOT, 'src', 'mod');
 const DIST = path.join(ROOT, 'dist');
 
 /**
- * 构建产物的 patch 位。远离官方版本号，避免和商店更新撞号。
- * 900 是 Linglass-Pro 1.12.4.900 的发布号；本次发布用 901 以区分新旧包。
+ * 构建产物的 patch 位，可通过环境变量 MOD_PATCH 覆盖。
+ * 该值高于商店版本号，避免与 Linglass 的版本冲突；当前发布号为 901。
  */
-const MOD_PATCH = 901;
+const MOD_PATCH = process.env.MOD_PATCH ?? 901;
 
-/** 我们的增量脚本只跑在 YouTube */
+/** 扩展脚本只跑在 YouTube */
 const SITE_MATCHES = ['https://www.youtube.com/*'];
 
 /** 开发构建里 dev server 的地址（127.0.0.1 属安全上下文，https 页面也能连） */
@@ -70,7 +70,7 @@ function log(msg) {
 }
 
 function warn(msg) {
-  console.warn(`[build] ⚠️  ${msg}`);
+  console.warn(`[build] 警告：${msg}`);
 }
 
 /** 取 vendor/ 下版本号最大的 linglass-* 目录作为基线 */
@@ -118,11 +118,11 @@ async function verifySubtitleContract(vendor) {
   const missing = SUBTITLE_CONTRACT.filter((token) => !found.has(token));
   if (missing.length) {
     warn(`官方可能改版：assets/ 下找不到 ${missing.join(', ')}`);
-    warn('src/mod/desktop-subtitles.js 依赖这套 Shadow DOM 契约，构建仍继续，但请先核对选择器');
+    warn('src/mod/30-desktop-subtitles.js 依赖这套 Shadow DOM 契约，构建仍继续，请核对选择器');
     return;
   }
 
-  log(`契约校验  ✓  ${[...new Set(found.values())].join(', ')}`);
+  log(`契约校验  通过  ${[...new Set(found.values())].join(', ')}`);
 }
 
 /**
@@ -163,8 +163,8 @@ async function scanMod() {
 }
 
 /**
- * 开发构建：把我们的 SW 客户端挂到官方 service worker 入口上。
- * MV3 只允许一个 background.service_worker，所以不能另起一个，只能搭在官方入口后面。
+ * 开发构建：将扩展的 Service Worker 模块挂到 Linglass 的 service worker 入口。
+ * MV3 只允许一个 background.service_worker，因此不能单独注册。
  */
 async function patchServiceWorker(swModules) {
   if (!swModules.length) return;

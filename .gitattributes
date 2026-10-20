@@ -1,0 +1,6 @@
+* text=auto
+
+*.zip binary
+*.crx binary
+*.png binary
+*.jpg binary

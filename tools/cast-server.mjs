@@ -194,7 +194,7 @@ function handleStream(req, res, url) {
     connection: 'keep-alive',
     // 有反向代理时别缓冲，否则字幕会攒着一起到
     'x-accel-buffering': 'no',
-    // ⚠️ 不要在这里再写 access-control-allow-origin：writeHead 里的头会覆盖
+    // 不要在这里再写 access-control-allow-origin：writeHead 里的头会覆盖
     // cors() 按白名单回显的那一份，退化成 `*` 就等于绕开了 §12 的校验。
   });
   // 断线后 1 秒重连（EventSource 自己会做）

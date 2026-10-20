@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 获取 Linglass 基线
+        run: make vendor-update
+
+      - name: 构建
+        run: make build
+
+      - name: 测试
+        run: make test
+
+      - name: 校验构建产物
+        run: make check

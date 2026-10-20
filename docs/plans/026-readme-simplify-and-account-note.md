@@ -82,7 +82,7 @@ forbidden_paths:
   - README 的「断句」一节从 9 行规则表 + 6 条边界压成两段 + 指向 PLAN 020，
     细节没有丢，只是搬了位置。
   - 「装好后需要登录」这条提示目前只在 README 与安装向导里；
-    安装器版包内的 `INSTALL.html` 由 `docs/install-guide.html` 生成，两边口径一致。
+    发布包内的 `INSTALL.html` 由 `docs/install-guide.html` 生成，两边口径一致。
   - 未验证的部分：安装向导新增的 `.note` 在浅色 / 深色主题下的实际观感
     （沿用既有 `.note` 类，理论无风险），以及真机上「Google 登录打不开」的具体表现 ——
     那条结论来自官方基线里的 `loginWithGoogle()` / `signup.*` 文案与常见网络受限事实，

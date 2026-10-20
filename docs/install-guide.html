@@ -126,39 +126,32 @@
 <header>
   <h1>Linglass-Pro 安装向导</h1>
   <p class="lead">
-    这是 <b>Linglass</b>（YouTube 日语双语字幕扩展）的一个增强版：额外提供
-    <b>桌面字幕浮窗</b>（字幕留在桌面上，切到别的软件也能看）与<b>侧栏学习面板</b>（整条字幕、逐句跳转、导出对照文本）。
+    Linglass-Pro 在 <b>Linglass</b>（YouTube 日语双语字幕扩展）基础上增加
+    <b>桌面字幕浮窗</b>与<b>侧栏学习面板</b>：浮窗将字幕保留在桌面上，切换到其他应用后仍然可见；
+    学习面板显示完整字幕，支持逐句跳转与对照文本导出。
   </p>
 </header>
 
 <main>
   <div class="note">
-    <b>先确认手上是哪个包：</b>
-    <ul>
-      <li>
-        解压后看到 <code>install-macos.command</code> 或 <code>install-windows.bat</code>
-        —— 这是<b>安装器版</b>：先双击它（macOS 第一次要右键 → 打开），
-        等它跑完，再做下面 4 步。
-      </li>
-      <li>
-        解压后直接看到 <code>manifest.json</code> 和一个叫 <code>mod</code> 的文件夹
-        —— 这是<b>完整包</b>：什么都不用装、不用联网，直接做下面 4 步。
-      </li>
-    </ul>
-    剩下这 4 下点击必须由你亲自点，浏览器不允许任何程序代劳。
+    <b>先运行安装脚本：</b>解压后运行 <code>install-macos.command</code>
+    或 <code>install-windows.bat</code>。macOS 首次运行需右键选择「打开」。
+    等待脚本结束后，再执行下面 4 个步骤。脚本会从 Chrome 商店获取 Linglass 当前版本并生成
+    <code>dist</code> 目录。
+    <br>
+    以下 4 个步骤需要在浏览器中手动完成。
   </div>
 
   <div class="note">
-    <b>装好后要登录一次，才看得到字幕。</b>
+    <b>安装后需要登录，才会显示字幕。</b>
     <ul>
       <li>
-        这个扩展靠 Linglass 官方的翻译服务出字幕，<b>没登录就没有字幕</b>，
-        桌面浮窗和侧栏面板都会是空的。
+        字幕由 Linglass 的翻译服务提供。未登录时没有字幕数据，
+        桌面浮窗与侧栏面板为空。
       </li>
       <li>
-        登录页上会看到 <b>Google / Apple 登录</b>和<b>邮箱注册</b>两种方式。
-        如果你的网络打不开 Google，别在那里反复重试，
-        直接用<b>邮箱注册一个自己的账号</b>就行 —— 扩展本身和功能完全一样。
+        登录页提供 <b>Google / Apple 登录</b>与<b>邮箱注册</b>。
+        如果网络无法访问 Google，可直接使用<b>邮箱注册</b>，功能完全一致。
       </li>
     </ul>
   </div>
@@ -167,8 +160,8 @@
     <li>
       <h2>打开浏览器的扩展管理页</h2>
       <p>
-        安装程序应该已经帮你打开了。如果没打开，就在地址栏里输入
-        <code>chrome://extensions</code> 回车（Arc 浏览器用 <code>arc://extensions</code>）。
+        安装脚本会自动打开该页面。如果没有打开，在地址栏输入
+        <code>chrome://extensions</code> 并回车；Arc 浏览器使用 <code>arc://extensions</code>。
       </p>
       <figure>
         <svg viewBox="0 0 520 214" role="img" aria-label="浏览器扩展管理页示意">
@@ -184,7 +177,7 @@
           <circle cx="429" cy="67" r="7" fill="#fff"/>
           <rect x="24" y="52" width="168" height="28" rx="7" fill="var(--bg)" stroke="var(--accent)"/>
           <text x="38" y="70" font-size="12" fill="var(--accent)">加载已解压的扩展程序</text>
-          <text x="24" y="118" font-size="12" fill="var(--muted)">（这里现在是空的，装完会多出一张卡片）</text>
+          <text x="24" y="118" font-size="12" fill="var(--muted)">安装前列表为空</text>
           <line x1="24" y1="132" x2="496" y2="132" stroke="var(--line)" stroke-dasharray="4 4"/>
           <text x="24" y="160" font-size="11" fill="var(--muted)">如果看不到「加载已解压的扩展程序」，</text>
           <text x="24" y="178" font-size="11" fill="var(--muted)">说明第 2 步的开发者模式开关还没打开。</text>
@@ -195,26 +188,16 @@
     <li>
       <h2>打开右上角的「开发者模式」开关</h2>
       <p>
-        开关会变成蓝色。这一步只是打开页面上的两个按钮，不会降低安全性，
-        也不会影响你原来装的其它扩展。
+        启用后开关显示为蓝色。该选项只显示页面上的两个操作按钮，不会降低浏览器安全性，
+        也不影响已安装的其他扩展。
       </p>
     </li>
 
     <li>
       <h2>点「加载已解压的扩展程序」，选中 dist 文件夹</h2>
       <p>
-        要选哪一层文件夹，看你手上是哪个包：
+        选中解压目录中的 <code>dist</code> <b>子</b>目录，其同级目录为 src、tools 与 docs。
       </p>
-      <ul>
-        <li>
-          <strong>完整版</strong> —— 选解压出来的那个文件夹本身
-          （里面能直接看到 <code>manifest.json</code> 和 <code>mod</code>）。
-        </li>
-        <li>
-          <strong>安装器版</strong> —— 选那个文件夹里叫 <code>dist</code> 的<b>子</b>文件夹
-          （它旁边还有 src、tools、docs）。
-        </li>
-      </ul>
       <figure>
         <svg viewBox="0 0 520 196" role="img" aria-label="选择 dist 文件夹示意">
           <rect x="1" y="1" width="518" height="194" rx="10" fill="var(--card)" stroke="var(--line)"/>
@@ -226,7 +209,7 @@
           <text x="38" y="106" font-size="11" fill="var(--accent)">Linglass-Pro-安装包</text>
           <text x="46" y="126" font-size="10" fill="var(--muted)">└ dist</text>
           <rect x="176" y="60" width="150" height="22" rx="5" fill="var(--accent-soft)"/>
-          <text x="186" y="75" font-size="12" fill="var(--ink)">dist（安装器版选这层）</text>
+          <text x="186" y="75" font-size="12" fill="var(--ink)">dist（选这层）</text>
           <text x="186" y="103" font-size="11" fill="var(--muted)">src</text>
           <text x="186" y="123" font-size="11" fill="var(--muted)">tools　docs</text>
           <rect x="380" y="160" width="116" height="26" rx="6" fill="var(--accent)"/>
@@ -234,17 +217,16 @@
         </svg>
       </figure>
       <div class="note">
-        <b>选错文件夹是最常见的失败：</b>判断标准只有一个 ——
-        你选中的那一层里要能<b>直接看到</b> <code>manifest.json</code>。
-        看不见扩展名也没关系，图标是「一张纸带个小齿轮」那个就是。
+        <b>常见失败是选错目录。</b>判断依据是所选目录中能<b>直接看到</b>
+        <code>manifest.json</code>。未显示扩展名时，类型为 JSON 的文件即为该文件。
       </div>
     </li>
 
     <li>
-      <h2>看到卡片出现，去 YouTube 试一下</h2>
+      <h2>确认安装结果</h2>
       <p>
-        列表里多出一张写着 <strong>Linglass-Pro</strong> 的卡片，就装好了。
-        打开任意一个带字幕的日语视频：画面里会出现桌面字幕浮窗，右侧会出现学习面板。
+        扩展列表中出现 <strong>Linglass-Pro</strong> 卡片即表示安装完成。
+        打开任意带字幕的日语视频，画面中会出现桌面字幕浮窗，右侧会出现学习面板。
       </p>
       <figure>
         <svg viewBox="0 0 520 200" role="img" aria-label="装好之后的效果示意">
@@ -263,66 +245,57 @@
           <rect x="378" y="150" width="110" height="16" rx="4" fill="var(--bg)" stroke="var(--accent)"/>
           <text x="392" y="162" font-size="10" fill="var(--accent)">导出对照文本</text>
           <rect x="150" y="170" width="200" height="24" rx="6" fill="var(--surface)" stroke="var(--line)"/>
-          <text x="162" y="186" font-size="10" fill="var(--muted)">桌面字幕浮窗（切到别的软件也在）</text>
+          <text x="162" y="186" font-size="10" fill="var(--muted)">桌面字幕浮窗</text>
         </svg>
       </figure>
     </li>
   </ol>
 
-  <h3>双击安装文件没反应？（只有安装器版会遇到）</h3>
+  <h3>双击安装文件没反应？</h3>
   <details>
     <summary>macOS：提示「无法打开，因为它来自身份不明的开发者」</summary>
     <p>
-      这是系统的安全拦截，不是文件坏了。解决办法：<strong>右键点安装文件 → 打开 → 在弹窗里再点一次「打开」</strong>。
-      只需要做一次，之后双击就正常了。
+      这是 macOS 的安全拦截，文件本身没有损坏。处理方式：<strong>右键点击安装文件 → 打开 → 在弹窗中再次点击「打开」</strong>。
+      该操作只需执行一次，之后可正常双击运行。
     </p>
   </details>
   <details>
-    <summary>macOS：双击完全没有反应</summary>
-    <p>通常是解压时丢了「可执行」权限。打开「终端」App，把下面两行粘进去（先按提示把文件夹拖进终端就能填上路径）：</p>
-    <p><code>cd 解压出来的文件夹路径</code><br><code>chmod +x install-macos.command && ./install-macos.command</code></p>
+    <summary>macOS：双击后没有反应</summary>
+    <p>通常是解压过程中丢失了可执行权限。打开「终端」，执行以下命令，并先将文件夹拖入终端以补全路径：</p>
+    <p><code>cd 解压目录路径</code><br><code>chmod +x install-macos.command && ./install-macos.command</code></p>
   </details>
   <details>
-    <summary>提示要先装 Node.js</summary>
+    <summary>提示需要安装 Node.js</summary>
     <p>
-      安装程序需要它来下载官方基线和生成文件（扩展本身不需要）。按提示到
-      <a href="https://nodejs.org/zh-cn/download">nodejs.org</a> 下载 <strong>LTS</strong> 版本，一路默认装完，
-      再双击一次安装文件即可。
-    </p>
-    <p>
-      完整版不会遇到这个提示 —— 它什么都不用装。
+      安装脚本需要 Node.js 来获取 Linglass 当前版本并生成扩展文件，扩展运行时不依赖 Node.js。
+      从 <a href="https://nodejs.org/zh-cn/download">nodejs.org</a> 下载 <strong>LTS</strong> 版本，
+      使用默认选项完成安装，然后重新运行安装文件。
     </p>
   </details>
   <details>
     <summary>Windows：提示「Windows 已保护你的电脑」</summary>
-    <p>点「更多信息」→「仍要运行」。这是因为安装脚本没有花钱买数字签名。</p>
+    <p>选择「更多信息」→「仍要运行」。原因是安装脚本未进行代码签名。</p>
   </details>
   <details>
-    <summary>安装时的窗口里一堆滚动的英文，正常吗？（只有安装器版会弹这个窗口）</summary>
+    <summary>安装窗口中出现大量滚动日志，是否正常？</summary>
     <p>
-      正常。那是下载和构建的日志，中间出现几行黄色 <code>⚠️</code> 也多半只是提示。
-      只要最后出现「还差 4 下点击」就算成功；看到 <code>✖</code> 才是失败，窗口里会写原因，
-      再双击一次重试通常就好。
+      正常。窗口中显示的是下载与构建日志，其中的黄色 <code>⚠️</code> 警告通常不影响结果。
+      最后出现「还差 4 步」表示成功；出现 <code>✖</code> 表示失败，窗口中会说明原因，可重新运行安装文件重试。
     </p>
   </details>
   <details>
-    <summary>Linglass 官方更新了，我这边怎么办？</summary>
+    <summary>Linglass 发布了新版本，需要如何处理？</summary>
     <p>
-      官方发新版<b>不会</b>自动同步到你这里，需要手动换一次：
-    </p>
-    <ul>
-      <li><b>安装器版</b>：重新双击一次安装文件，它会拉最新官方版本、重新生成 <code>dist</code>。</li>
-      <li><b>完整版</b>：向给你这个包的人要一份新包，重新解压。</li>
-    </ul>
-    <p>
-      换完之后回到扩展管理页，点 Linglass-Pro 卡片上的「刷新」按钮（&#8635;）即可。
+      Linglass 发布新版本后<b>不会</b>自动同步到本扩展，需要重新执行一次安装：
+      运行安装文件，获取最新版本并重新生成 <code>dist</code>。
+      完成后回到扩展管理页，点击 Linglass-Pro 卡片上的「刷新」按钮（&#8635;）。
     </p>
   </details>
   <details>
-    <summary>怎么卸载？会留下垃圾吗？</summary>
+    <summary>如何卸载？会留下残留文件吗？</summary>
     <p>
-      在扩展管理页点 Linglass-Pro 卡片上的「移除」，然后把解压出来的那个文件夹删掉就行，
-      不会在系统里留任何东西。
+      在扩展管理页点击 Linglass-Pro 卡片上的「移除」，然后删除解压目录。
+      扩展不会在系统中安装其他文件。
     </p>
   </details>
 
@@ -330,30 +303,17 @@
   <details>
     <summary>需要先装原版 Linglass 吗？</summary>
     <p>
-      不需要，也不建议同时开着 —— 这个安装包已经包含了官方扩展的全部功能，只是额外叠了增强。
-      如果你原来装过官方版本，可以先在扩展管理页把它「移除」，避免两边同时改字幕。
+      不需要。安装脚本会获取 Linglass 当前版本，并与本扩展的源码一起构建成
+      <code>dist</code>，安装后的扩展包含 Linglass 的全部功能。
+      如果已经装了商店版本的 Linglass，建议先在扩展管理页将它「移除」，避免两个扩展同时修改字幕。
     </p>
-  </details>
-  <details>
-    <summary>「安装器版」和「完整版」到底差在哪？</summary>
-    <p>
-      两个包装的是同一件东西（Linglass 官方代码 + 本项目的改造），区别只在「谁去把官方那份取回来」：
-    </p>
-    <ul>
-      <li>
-        <b>安装器版</b>：从 release 下载的就是这一种。安装时由你的电脑自己去
-        Chrome 商店取官方那份，所以要先装一次 Node.js 并联网。
-      </li>
-      <li>
-        <b>完整版</b>：包里已经装好了，拿来即用，通常只在私下分享时才有。
-      </li>
-    </ul>
   </details>
 </main>
 
 <footer>
   装好后如果字幕不显示或者浮窗没出来：先确认视频本身有字幕（点视频右下角的 CC 按钮），
-  再刷新一次页面。仍然不行的话，把「扩展管理页 → Linglass-Pro → 详情 → 错误」里的信息发给我们。
+  再刷新一次页面。仍然不行的话，把「扩展管理页 → Linglass-Pro → 详情 → 错误」里的信息提交到
+  <a href="https://github.com/gaaiyeoi/Linglass-Pro/issues">GitHub Issues</a>。
 </footer>
 </body>
 </html>

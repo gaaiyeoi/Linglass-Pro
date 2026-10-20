@@ -1,16 +1,15 @@
-# 构建产物，由 `make build` 生成
+# 构建产物
 dist/
-
-# 两个安装包的产物（完整版 / 安装器版），由 `make package` 生成
 release/
 
-# 官方基线：Linglass 商店下发的专有代码，不进版本控制（体积大，且每次 make vendor-update
-# 都能重新取到）。用 `make vendor-update` 从 Chrome 商店下载即可。
-# 注意：它不进版本控制，但 `make package` 的**完整版**会把它打进发布包 ——
-# 分发口径与风险见 README「只想装上用（不写代码）」一节。
+# Linglass 基线：由 `make vendor-update` 从 Chrome 商店下载，不纳入版本控制
 vendor/
 
-# 系统与依赖
-.DS_Store
+# 依赖与工具缓存
 node_modules/
 .scratch/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.log

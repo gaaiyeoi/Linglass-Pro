@@ -1,0 +1,18 @@
+{
+  "name": "linglass-pro",
+  "version": "1.12.4",
+  "private": true,
+  "description": "Chrome extension that adds a desktop subtitle window, mobile subtitle display, a study panel and Japanese phrase segmentation to Linglass.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "make test",
+    "check": "make check",
+    "dev": "node tools/dev.mjs",
+    "package": "make package",
+    "probe": "node tools/probe.mjs --headed --keep",
+    "clean": "make clean"
+  }
+}

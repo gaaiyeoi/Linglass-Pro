@@ -1,10 +1,7 @@
 #!/bin/bash
-# Linglass-Pro 一键安装（macOS 双击入口）
+# Linglass-Pro 安装入口（macOS）
 #
-# 这个文件刻意很薄：真正的事情全在 tools/install.mjs 里，
-# 与 Windows 侧的 install-windows.bat 共用同一份逻辑。
-#
-# 有 Node 就直接跑；没有就引导去装（扩展本身不需要 Node，只有安装程序需要）。
+# 实际安装逻辑位于 tools/install.mjs，与 install-windows.bat 共用。
 
 cd "$(dirname "$0")" || exit 1
 
@@ -14,13 +11,12 @@ echo ""
 
 if ! command -v node >/dev/null 2>&1; then
   cat <<'EOF'
-还没有安装 Node.js。
+未检测到 Node.js。
 
-它是这个安装程序跑起来需要的东西（扩展本身不需要它，装完就可以不管了）。
-接下来会自动打开下载页面：下载 LTS 版本，一路「继续」装完，
-然后回到这个文件夹，再双击一次本文件。
+安装脚本需要 Node.js，扩展运行时不依赖它。
+按任意键将打开下载页面，请安装 LTS 版本，然后重新运行本文件。
 
-按任意键打开下载页面……
+按任意键继续……
 EOF
   read -n 1 -s -r
   open "https://nodejs.org/zh-cn/download"
@@ -31,7 +27,7 @@ node tools/install.mjs
 status=$?
 
 echo ""
-echo "（这个窗口可以关掉了。按任意键退出。）"
+echo "安装流程结束，可以关闭此窗口。按任意键退出。"
 read -n 1 -s -r
 
 exit $status
