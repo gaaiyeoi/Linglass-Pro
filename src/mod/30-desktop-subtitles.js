@@ -1458,23 +1458,31 @@ body { background: var(--llg-glass-${glass}); }
   }
 
   /**
+   * 纯切点：只问 05-ja-segment.js，不看任何开关。
+   * 手机字幕屏用它（PLAN 064：手机上的分词默认打开，不跟视频内断句开关走）。
+   */
+  function segmentPoints(text) {
+    const segment = globalThis.__llgModJaSegment;
+    if (!text || !segment || typeof segment.cut !== 'function') return [];
+    const points = segment.cut(text);
+    return points && points.length ? points : [];
+  }
+
+  /**
    * 当前这一行的文节切点（纯文本偏移，严格升序，最后一点落在文本末尾）。
    * 断句开关关着、或 15-ja-break.js 没加载（扩展被裁剪过）时返回空数组。
    */
   function cuePoints(text) {
     const jaBreak = globalThis.__llgModJaBreak;
-    const segment = globalThis.__llgModJaSegment;
     if (!text || !jaBreak || typeof jaBreak.isEnabled !== 'function' || !jaBreak.isEnabled()) {
       return [];
     }
-    if (!segment || typeof segment.cut !== 'function') return [];
-    const points = segment.cut(text);
-    return points && points.length ? points : [];
+    return segmentPoints(text);
   }
 
-  function primaryParts(text) {
+  function primaryParts(text, givenPoints) {
     const plain = [{ text: text || '', sep: false }];
-    const points = cuePoints(text);
+    const points = givenPoints || cuePoints(text);
     if (!points.length) return plain;
 
     // cut() 的切点严格升序、且最后一点落在文本末尾，所以这样切不会丢尾巴
@@ -3861,11 +3869,14 @@ body { background: var(--llg-glass-${glass}); }
 
     if (castCache.key === key && castCache.value) return castCache.value;
 
+    // 手机屏的分词不跟视频内断句开关走：这块屏上段间距是唯一的词组边界提示，
+    // 默认就该有（PLAN 064）；要关在手机的字幕设置里关。
+    const castPoints = segmentPoints(lines.primary);
     const value = {
       primary: lines.primary || '',
       segments: tokens
-        ? richSegments(tokens, cuePoints(lines.primary))
-        : partsToSegments(primaryParts(lines.primary)),
+        ? richSegments(tokens, castPoints)
+        : partsToSegments(primaryParts(lines.primary, castPoints)),
       // 双语关掉时官方也不显示译文行 —— 手机跟着它
       secondary: appearance.dual ? lines.secondary || '' : '',
       prev: contextCue(-1),

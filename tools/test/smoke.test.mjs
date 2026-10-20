@@ -3365,6 +3365,23 @@ test('桌面字幕：设置页里滚轮不接管选句', async () => {
  * 而同一句的分词 / 注音分段结果完全一样。这里钉住「同句不重复切、换句必须重切」，
  * 否则以后有人把缓存删掉也不会红。
  */
+test('手机字幕屏：分词默认打开，不跟视频内断句开关走（PLAN 064）', async () => {
+  const { sandbox, h } = await harness({ withPip: true });
+  const pip = sandbox.__llgModPip;
+  h.jaBreakEnabled = false;
+  h.currentTime = 10;
+  show(h, '昨日買った本を読む', '昨天买的书');
+  await h.drain();
+
+  const lines = pip.castLines();
+  assert.ok(lines.segments.length > 1, '断句开关关着也要切给手机屏');
+  // 沙箱里的数组原型与主上下文不同，用 JSON 比结构而不是 deepEqual
+  assert.equal(
+    JSON.stringify(lines.segments.map((seg) => seg.map((token) => token.text).join(''))),
+    JSON.stringify(['昨日', '買った', '本を', '読む']),
+  );
+});
+
 test('手机字幕屏：同一句重复取快照不重复分词', async () => {
   const { sandbox, h } = await harness({ withPip: true });
   const pip = sandbox.__llgModPip;

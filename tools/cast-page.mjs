@@ -1,15 +1,26 @@
 /**
  * 手机字幕屏 —— 接收页
  *
- * 排版**规则**照抄 src/mod/30-desktop-subtitles.js 的 pipCss()：字体栈、字重、字号比例、
- * 颜色、底板、阴影/描边用的都是官方（Linglass）那套公式，只是把「基座 24px」换成了
- * 「按屏幕高度算的基座」—— 手机上 24px 太小，而比例必须一致，否则就不是同一套样式了。
+ * 排版按 PLAN 063 的手机屏规格分层（100% 档位）：
+ *
+ *   上文预览  20px / 40% 白 / 1.4 / 与主字幕间距 12px
+ *   当前原文  36px / 600 / 1.6 / #FFFFFF
+ *   假名注音  18px / 80% 白 / 悬在汉字正上方，间距 4px
+ *   主译文    24px / 400 / 85% 白 / 上 8px、下 16px
+ *   下文预览  20px / 40% 白 / 1.4
+ *
+ * 无底板、无句内进度底色、无竖线分隔符：文节之间只用 6px 间距分层，
+ * 剩下的层级全部由字号、字重与透明度表达（style 预设仍决定字体栈与描边）。
+ * 字号档位 50–150% 在这套规格上等比缩放。
+ *
+ * 布局（PLAN 063 v2）：字幕块垂直居中；播放控制竖排贴右侧下方，
+ * 齿轮在右上、连接状态在左上；底部只留整片进度条，因此字幕不再被控件顶上去。
+ * 界面里的图标一律用内联 SVG，不使用任何 emoji 或依赖字体的符号字符。
  *
  * 与浮窗的差别：
  *   1. 控制条只有播放/暂停、±5 秒、倍速（PLAN 042）：命令发回 cast-server，
  *      由扩展在自己的下一次 /push 里取走并操作 Mac 上的 video。手机上不画进度条拖拽；
- *   2. 基座字号跟视口高度走（clamp 24–64px），档位 50–150% 仍按官方 step 10；
- *   3. 上下文行的「点一句跳转」没有（跨设备跳不了）。
+ *   2. 上下文行的「点一句跳转」没有（跨设备跳不了）。
  *
  * 页面完全内联：手机端不发任何外部请求，断网时也不会卡在加载样式表。
  */
@@ -26,51 +37,16 @@ const COMIC_LANGS = [
   'en', 'de', 'fr', 'es', 'it', 'pt-BR', 'pt-PT', 'nl', 'sv', 'pl', 'cs', 'tr', 'id', 'ru', 'uk',
 ];
 
-/** 官方 fe：这三种语言的原文行放大一档、加粗一档 */
-const CJK_LANGS = ['zh', 'ja', 'ko'];
-
-/** 官方四套预设（settings-*.js 的 f），字段与 30 里的 STYLE_SPECS 一一对应 */
+/**
+ * 官方四套预设（settings-*.js 的 f），这里只取手机屏仍用得上的部分：
+ * 描边 / 阴影 / 字距。字号、字重、行高由 PLAN 063 的规格统一决定，
+ * 底板也不再画（见 appearanceCss 的注释）。
+ */
 const STYLE_SPECS = {
-  classic: {
-    primaryWeight: 500,
-    secondaryWeight: 400,
-    plate: 'block',
-    plateOpacity: .8,
-    outlineEm: 0,
-    shadow: 'plate',
-    secondaryAlpha: .75,
-    letterSpacingEm: 0,
-  },
-  cinema: {
-    primaryWeight: 600,
-    secondaryWeight: 500,
-    plate: 'none',
-    plateOpacity: 0,
-    outlineEm: .055,
-    shadow: 'depth',
-    secondaryAlpha: 1,
-    letterSpacingEm: .004,
-  },
-  comic: {
-    primaryWeight: 700,
-    secondaryWeight: 600,
-    plate: 'none',
-    plateOpacity: 0,
-    outlineEm: .085,
-    shadow: 'offset',
-    secondaryAlpha: 1,
-    letterSpacingEm: .008,
-  },
-  contrast: {
-    primaryWeight: 600,
-    secondaryWeight: 500,
-    plate: 'line',
-    plateOpacity: .88,
-    outlineEm: 0,
-    shadow: 'none',
-    secondaryAlpha: 1,
-    letterSpacingEm: 0,
-  },
+  classic: { outlineEm: 0, shadow: 'plate', letterSpacingEm: 0 },
+  cinema: { outlineEm: .055, shadow: 'depth', letterSpacingEm: .004 },
+  comic: { outlineEm: .085, shadow: 'offset', letterSpacingEm: .008 },
+  contrast: { outlineEm: 0, shadow: 'none', letterSpacingEm: 0 },
 };
 
 const STYLE_CHOICES = ['classic', 'cinema', 'comic', 'contrast'];
@@ -89,12 +65,32 @@ const STYLE_ICONS = {
 };
 const COLOR_NAMES = { '#FFFFFF': '白色', '#FFD60A': '黄色', '#64D2FF': '青色', '#30D158': '绿色' };
 
-/** 官方常量（30-desktop-subtitles.js 同名同值） */
-const BASE_FONT_PX = 24;
+/**
+ * 手机屏排版规格（PLAN 063）：100% 档位下的像素值，档位 50–150% 等比缩放。
+ * 注音单独一档：它比原文小一半，但仍要在线宽屏上看得清。
+ */
+const TYPE_SPEC = {
+  primary: 36,
+  secondary: 24,
+  context: 20,
+  ruby: 18,
+};
+
+/** 字号下限：档位调到 50% 时仍不能小到无法阅读 */
 const MIN_FONT_PX = 11;
-const CJK_FONT_RATIO = 27 / 24;
-const SECONDARY_RATIO = 20 / 24;
-const CTX_FONT_RATIO = 0.7;
+
+/**
+ * 主译文固定用冷色（PLAN 063 v3）：原文是纯白 + 600，译文是同色系的浅蓝 + 400，
+ * 字号也小一档。三种差异叠在一起，扫一眼就能分清「哪行是日语、哪行是翻译」。
+ * 不跟随设置里的原文颜色：跟随之后两者又变成同一个色相，区分度就没了。
+ */
+const SECONDARY_COLOR = 'rgba(168, 199, 250, .88)';
+
+/**
+ * 文节之间的间距（替代原来的竖线分隔符）。
+ * 6px 在 36px 的原文里几乎看不出来（只相当于字宽的 1/6），调到 10px 才能一眼分出词组。
+ */
+const SEGMENT_GAP_PX = 10;
 
 export function renderPage(room, bootPrefs) {
   return `<!doctype html>
@@ -114,7 +110,8 @@ export function renderPage(room, bootPrefs) {
 <title>字幕屏</title>
 <style>
   /* 骨架照抄浮窗：深灰蓝而不是纯黑（与 30-desktop-subtitles.js 的 PIP_BASE_CSS 同值） */
-  :root { color-scheme: dark; --radius-sm: 8px; --pad: max(16px, env(safe-area-inset-left)); }
+  /* 左右留白 12px：36px 的原文一行能多放近一个字，长句更容易只断成两行 */
+  :root { color-scheme: dark; --radius-sm: 8px; --pad: max(12px, env(safe-area-inset-left)); }
   * { box-sizing: border-box; }
   html, body {
     margin: 0; height: 100%; background: #141518; overflow: hidden;
@@ -124,51 +121,65 @@ export function renderPage(room, bootPrefs) {
   #stage {
     position: fixed; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px;
-    /* 底部留出常驻控制条 + 进度条的高度，否则长句会压到它们下面（PLAN 044） */
+    /* 行间距全部由各行的 margin 精确控制（PLAN 063） */
+    gap: 0;
+    /* 控制条已挪到右侧竖排，底部只剩一条 5px 进度条：留 24px 即可。
+       上下留白接近对称，字幕块因此落在画面正中，不再被控件顶上去（PLAN 063 v2） */
     padding: calc(env(safe-area-inset-top) + 8px) var(--pad)
-             calc(env(safe-area-inset-bottom) + 104px);
+             calc(env(safe-area-inset-bottom) + 24px);
   }
-  /* 上下文行：整段一起淡（官方 .ctx 是 .4），只有当前句不透明 */
+  /* 上下文行：整段一起淡到 40%，字号与颜色由 appearanceCss 给（13px） */
   .ctx {
     display: flex; flex-direction: column; align-items: center;
-    max-width: 100%; opacity: .4;
+    max-width: 100%;
   }
+  /* 上文与主字幕之间 12px */
+  #prev { margin-bottom: 12px; }
   .ctx-line {
-    display: block; line-height: 1.3; text-align: center; white-space: pre-wrap;
+    display: block; line-height: 1.4; text-align: center; white-space: pre-wrap;
     max-width: 100%;
   }
   #plate {
     display: flex; flex-direction: column; align-items: center;
     box-sizing: border-box; max-width: 100%;
+    /* 主译文的底部外边距：单语（译文隐藏）时它仍把主字幕与下文预览隔开 */
+    margin-bottom: 16px;
   }
-  .kline {
-    position: relative; display: inline-block; max-width: 100%;
-  }
-  /* 句内进度：铺在文字身后的半透明蓝底（官方 .kfill 同色）。
-     用 transform 而不是 width：宽度变化会触发布局，走合成器才不会掉帧 */
+  /* 句内进度只铺在日语原文背后（PLAN 063 v3）：极淡的蓝，不抢文字；
+     译文行不铺，避免两行各有一条进度、看起来像两个播放位置。 */
+  /* max-content：短句时进度块贴合文字宽度；长句换行后受 max-width 限制，变成整行宽 */
+  .kline { position: relative; display: inline-block; width: max-content; max-width: 100%; }
   .kfill {
     position: absolute; left: 0; top: 0; bottom: 0; width: 100%;
-    border-radius: var(--radius-sm);
+    border-radius: 6px; background: rgba(10, 132, 255, .13);
     transform: scaleX(0); transform-origin: left center;
     will-change: transform;
   }
-  /* 句内进度：与浮窗 --llg-accent-soft / --llg-accent-softer 同值（PLAN 047） */
-  #fill-primary { background: rgba(10, 132, 255, .14); }
-  #fill-secondary { background: rgba(10, 132, 255, .09); }
   #line-primary, #line-secondary {
     position: relative; display: block;
-    line-height: 1.3; text-align: center; white-space: pre-wrap;
+    text-align: center; white-space: pre-wrap;
     max-width: 100%;
   }
-  /* 注音：与浮窗同一条规则（.5em / 400 / .6 透明度 / 行高抬到 1.9） */
-  #line-primary.has-ruby { line-height: 1.9; }
+  /* 压在填充之上：kfill 是绝对定位，默认画在普通流后面 */
+  #line-primary { z-index: 1; }
+  /* balance 只在放得下两行时生效（Safari 17.5+）：避免长句末尾只剩一个字独占一行 */
+  #line-primary { line-height: 1.6; text-wrap: balance; }
+  /* 带注音的行需要额外行距：rt 悬在基字上方，自身不撑开行盒，
+     只按 1.6 会给上一行让出 0 像素，注音直接压到上一行（真机实测）。 */
+  #line-primary:has(ruby) { line-height: 2; }
+  /* 主译文：与原文 8px、与下文预览 16px（后者落在 #plate 上） */
+  #line-secondary { line-height: 1.5; margin-top: 8px; }
+  /* 注音：12px（appearanceCss 按档位算）/ 80% 白；抬到汉字正上方并留 4px 间距 */
   #line-primary rt {
-    font-size: .5em; font-weight: 400; letter-spacing: 0;
-    opacity: .6; line-height: 1.15;
+    font-weight: 400; letter-spacing: 0;
+    color: rgba(255, 255, 255, .8);
+    line-height: 1.2;
+    padding-bottom: 4px;
   }
-  /* 文节分隔符：与浮窗 .llg-sep / 视频内 ::after 用同一组数值（PLAN 047） */
-  .llg-sep { margin: 0 .15em; opacity: .34; font-weight: 400; }
+  /* 文节之间只用微弱间距，不画竖线（PLAN 063）；「分词 → 隐藏」时归零（PLAN 064） */
+  .llg-seg { display: inline; }
+  .llg-seg:not(:last-child) { margin-right: ${SEGMENT_GAP_PX}px; }
+  .kline.no-seg .llg-seg:not(:last-child) { margin-right: 0; }
 
   /* 空态：与浮窗同一句文案 */
   #stage.empty::before {
@@ -199,9 +210,10 @@ export function renderPage(room, bootPrefs) {
     will-change: transform;
   }
 
+  /* 状态挪到左上：右上让给常驻的齿轮（控制条已改为右侧竖排，见 PLAN 063 v2） */
   #status {
     position: fixed; top: calc(env(safe-area-inset-top) + 8px);
-    right: max(12px, env(safe-area-inset-right));
+    left: var(--pad);
     font-size: 12px; color: #7a7a80; letter-spacing: .02em;
     display: flex; align-items: center; gap: 6px;
   }
@@ -210,24 +222,31 @@ export function renderPage(room, bootPrefs) {
   #status.off { color: #f87171; }
   #status.off #dot { background: #f87171; }
 
-  /* 播放控制条：常驻（PLAN 044）。原先「点画面浮出、5 秒自收」在真机上不可发现 ——
-     用户不知道要点，按钮就等于不存在。 */
+  /* 播放控制条：常驻（PLAN 044），v2 改为贴右侧竖排（PLAN 063 v2）。
+     竖排放在右下方，避开垂直居中的字幕块；底部只留整片进度条，
+     字幕因此不再被控件顶到画面上半部。 */
   #controls {
-    position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(env(safe-area-inset-bottom) + 34px);
-    display: flex; align-items: center; gap: 2px;
-    padding: 4px; border-radius: 999px;
+    position: fixed; right: max(12px, env(safe-area-inset-right));
+    bottom: calc(env(safe-area-inset-bottom) + 40px);
+    display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+    padding: 4px; border-radius: 20px;
     background: rgba(24, 24, 27, .92); border: 1px solid rgba(255, 255, 255, .12);
     z-index: 20;
   }
   #controls button {
     background: none; border: 0; color: #e5e7eb;
-    height: 34px; min-width: 42px; padding: 0 10px;
-    border-radius: 999px; font-size: 14px;
+    width: 52px; height: 38px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 16px; font-size: 14px;
     font-variant-numeric: tabular-nums;
   }
+  #controls button svg { width: 18px; height: 18px; }
   #controls button:active { background: rgba(255, 255, 255, .14); }
-  #controls #rate { min-width: 54px; color: #64d2ff; }
+  /* 图标按钮之间用细分隔线分组：设置 / 回退·播放·快进 / 倍速 */
+  #controls .group-sep {
+    height: 1px; margin: 2px 8px;
+    background: rgba(255, 255, 255, .12);
+  }
 
   /* 选句浮层（PLAN 045）：上滑打开，中间那行是「松手要跳到的句子」。
      只画 ±2 行 —— 手机屏幕小，五行刚好够看出上下文，又不会盖满整屏。 */
@@ -262,16 +281,13 @@ export function renderPage(room, bootPrefs) {
     font-variant-numeric: tabular-nums;
   }
 
-  /* 设置入口：常驻（在控制条上方，避免和它抢位置） */
-  #gear {
-    position: fixed; right: max(12px, env(safe-area-inset-right));
-    bottom: calc(env(safe-area-inset-bottom) + 88px);
-    width: 36px; height: 36px; border-radius: 50%;
-    border: 1px solid rgba(255, 255, 255, .18);
-    background: rgba(24, 24, 27, .9); color: #d1d5db;
-    font-size: 15px; padding: 0;
-    display: flex; align-items: center; justify-content: center;
-    z-index: 20;
+  /* 倍速：图标 + 右下角小数值。倍速是数值，纯图标看不出当前档位，
+     所以保留一个 9px 的角标，其余按钮一律只有图标。 */
+  #rate { position: relative; }
+  #rate-badge {
+    position: absolute; right: 5px; bottom: 3px;
+    font-size: 9px; line-height: 1; color: #64d2ff;
+    letter-spacing: .02em;
   }
 
   /* 设置面板：视觉语言照抄 Linglass 自己的面板（30-desktop-subtitles.js 的 PIP_PANEL_CSS）：
@@ -361,7 +377,8 @@ export function renderPage(room, bootPrefs) {
     z-index: 10;
   }
   #install.gone { opacity: 0; transform: translateX(-50%) translateY(-8px); pointer-events: none; }
-  #install .share { flex: none; font-size: 16px; opacity: .9; }
+  #install .share { flex: none; opacity: .9; }
+  #install .share svg { width: 18px; height: 18px; display: block; }
   #install .body { flex: 1; }
   #install b { color: #fff; font-weight: 600; }
   #install button {
@@ -390,10 +407,7 @@ export function renderPage(room, bootPrefs) {
       <i class="kfill" id="fill-primary"></i>
       <div id="line-primary"></div>
     </div>
-    <div class="kline" id="kline-secondary">
-      <i class="kfill" id="fill-secondary"></i>
-      <div id="line-secondary"></div>
-    </div>
+    <div id="line-secondary"></div>
   </div>
   <div id="next" class="ctx hidden">
     <div class="ctx-line" id="next-primary"></div>
@@ -410,12 +424,41 @@ export function renderPage(room, bootPrefs) {
   </div>
 </div>
 <div id="controls">
-  <button type="button" data-cmd="skip" data-v="-5" aria-label="快退 5 秒">−5s</button>
-  <button type="button" id="playpause" data-cmd="toggle" aria-label="播放或暂停">▶</button>
-  <button type="button" data-cmd="skip" data-v="5" aria-label="快进 5 秒">+5s</button>
-  <button type="button" id="rate" data-cmd="rate" aria-label="切换倍速">1×</button>
+  <button id="gear" type="button" aria-label="设置">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94 7.07 7.07 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.3 7.3 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54a7.3 7.3 0 0 0-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.74 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .61.22l2.39-.96a7.3 7.3 0 0 0 1.62.94l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54a7.3 7.3 0 0 0 1.62-.94l2.39.96a.5.5 0 0 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64zM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5z"/>
+    </svg>
+  </button>
+  <span class="group-sep"></span>
+  <button type="button" data-cmd="skip" data-v="-5" aria-label="快退 5 秒">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+      stroke-linecap="round" aria-hidden="true">
+      <path d="M4 12a8 8 0 1 0 2.35-5.66"/>
+      <path d="M4 4.4V9h4.6"/>
+      <text x="12" y="15.6" text-anchor="middle" font-size="8.4" stroke="none"
+        fill="currentColor">5</text>
+    </svg>
+  </button>
+  <button type="button" id="playpause" data-cmd="toggle" aria-label="播放或暂停">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+  </button>
+  <button type="button" data-cmd="skip" data-v="5" aria-label="快进 5 秒">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+      stroke-linecap="round" aria-hidden="true">
+      <path d="M20 12a8 8 0 1 1-2.35-5.66"/>
+      <path d="M20 4.4V9h-4.6"/>
+      <text x="12" y="15.6" text-anchor="middle" font-size="8.4" stroke="none"
+        fill="currentColor">5</text>
+    </svg>
+  </button>
+  <span class="group-sep"></span>
+  <button type="button" id="rate" data-cmd="rate" aria-label="切换倍速">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M3.5 6.5L10 12l-6.5 5.5zM12.5 6.5L19 12l-6.5 5.5z"/>
+    </svg>
+    <span id="rate-badge">1×</span>
+  </button>
 </div>
-<button id="gear" type="button" aria-label="设置">⚙</button>
 <div id="sheet">
   <div class="sheet-head"><span>字幕设置</span><button id="sheet-done" type="button">完成</button></div>
 
@@ -459,10 +502,21 @@ export function renderPage(room, bootPrefs) {
       <button type="button" data-v="0">隐藏</button>
     </div>
   </div>
+  <div class="row"><span>分词</span>
+    <div class="seg" data-pref="seg">
+      <button type="button" data-v="1">显示</button>
+      <button type="button" data-v="0">隐藏</button>
+    </div>
+  </div>
 </div>
 <div id="install" class="gone">
-  <span class="share">⤴</span>
-  <span class="body"><b>点这里去掉地址栏：</b>分享 → 添加到主屏幕 → 从主屏图标打开</span>
+  <span class="share">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 15.5V4"/><path d="M8 8l4-4 4 4"/><path d="M5 13.5v5.5h14v-5.5"/>
+    </svg>
+  </span>
+  <span class="body"><b>点这里去掉地址栏：</b>分享，添加到主屏幕，从主屏图标打开</span>
   <button id="install-ok" type="button">知道了</button>
 </div>
 <div id="hint">建议横屏 · 自动锁定设为「永不」</div>
@@ -485,16 +539,13 @@ export function renderPage(room, bootPrefs) {
   const COLOR_PRESETS = ${JSON.stringify(COLOR_PRESETS)};
   const RATE_STEPS = ${JSON.stringify(RATE_STEPS)};
   const COMIC_LANGS = ${JSON.stringify(COMIC_LANGS)};
-  const CJK_LANGS = ${JSON.stringify(CJK_LANGS)};
   const FONT_SANS = ${JSON.stringify(FONT_SANS)};
   const FONT_COMIC_LATIN = ${JSON.stringify(FONT_COMIC_LATIN)};
   const FONT_COMIC_JA = ${JSON.stringify(FONT_COMIC_JA)};
 
-  const BASE_FONT_PX = ${BASE_FONT_PX};
+  const TYPE_SPEC = ${JSON.stringify(TYPE_SPEC)};
+  const SECONDARY_COLOR = ${JSON.stringify(SECONDARY_COLOR)};
   const MIN_FONT_PX = ${MIN_FONT_PX};
-  const CJK_FONT_RATIO = ${CJK_FONT_RATIO};
-  const SECONDARY_RATIO = ${SECONDARY_RATIO};
-  const CTX_FONT_RATIO = ${CTX_FONT_RATIO};
   const SCALE_MIN = 50;
   const SCALE_MAX = 150;
   const SCALE_STEP = 10;
@@ -516,10 +567,6 @@ export function renderPage(room, bootPrefs) {
     return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')';
   }
 
-  function isCJK(lang) {
-    return CJK_LANGS.indexOf(lang) >= 0;
-  }
-
   function fontStackOf(spec, lang, style) {
     // comic 的手写体只覆盖拉丁语系与日语（与官方 oe() 一致）
     if (style === 'comic') {
@@ -527,10 +574,6 @@ export function renderPage(room, bootPrefs) {
       if (COMIC_LANGS.indexOf(lang) >= 0) return FONT_COMIC_LATIN;
     }
     return FONT_SANS;
-  }
-
-  function primaryWeightOf(spec, lang) {
-    return isCJK(lang) ? Math.min(700, spec.primaryWeight + 100) : spec.primaryWeight;
   }
 
   function shadowOf(shape, base) {
@@ -569,61 +612,37 @@ export function renderPage(room, bootPrefs) {
   }
 
   /**
-   * 手机上的「基座」：官方用播放器高度，这里用视口高度，档位仍是 50–150%。
-   *
-   * 系数 0.07（原先 0.085）是实测调下来的：横屏 iPhone 上 0.085 让常见的两三行日语
-   * 几乎顶满屏幕，第一次打开必须手动调小。0.07 时一行约 12–13 个汉字，两行仍留白。
+   * 某一行在指定档位下的字号。规格值就是 100% 档位，50–150% 等比缩放；
+   * 任何一行都不低于 MIN_FONT_PX（11px），否则 50% 档位下注音会糊成一条线。
    */
-  function baseFontPx(scale) {
-    // 取**短边**而不是高度：iOS 从主屏启动时，首帧的 innerHeight 常常还是竖屏的
-    // （844 而不是 393），按高度算会得到 56px 的基座 —— 正好是「刚进页面字非常大、
-    // 调一次字号又正常」的成因。短边在竖/横两种状态下都接近 390。
-    const vw = window.innerWidth || 390;
-    const vh = window.innerHeight || 390;
-    const shortSide = Math.min(vw, vh);
-    const seed = Math.max(20, Math.min(56, shortSide * 0.07));
-    return Math.max(MIN_FONT_PX, seed * (scale / 100));
+  function typePx(px, scale) {
+    return round1(Math.max(MIN_FONT_PX, px * (scale / 100)));
   }
 
-  function plateCss(spec, base) {
-    if (spec.plate === 'block') {
-      const scale = base / BASE_FONT_PX;
-      // 这里不要照搬桌面浮窗的背景模糊。
-      // 手机页的背景是纯色 #141518，模糊一层纯色在视觉上与不模糊完全一致；
-      // 但 iOS Safari 会把带背景模糊的子树排除在独立合成层之外，
-      // 里面的 .kfill（句内进度）每帧 scaleX 都要重栅格化整块底板 → 明显掉帧。
-      // 底部整片进度条（#progress-fill）在 #plate 之外，所以它一直是顺的。
-      return '#plate { padding: ' + round1(8 * scale) + 'px ' + round1(16 * scale) + 'px;'
-        + ' border-radius: ' + round1(8 * scale) + 'px;'
-        + ' background: linear-gradient(to bottom, rgba(0, 0, 0, ' + (spec.plateOpacity * 0.75) + '),'
-        + ' rgba(0, 0, 0, ' + spec.plateOpacity + ')); }';
-    }
-    if (spec.plate === 'line') {
-      const radius = round1(0.16 * base);
-      return '.kline { padding: ' + round1(0.14 * base) + 'px ' + round1(0.42 * base) + 'px;'
-        + ' background: rgba(0, 0, 0, ' + spec.plateOpacity + ');'
-        + ' border-radius: ' + radius + 'px; }'
-        + ' .kline + .kline { margin-top: ' + round1(0.14 * base) + 'px; }'
-        + ' .kfill { border-radius: ' + radius + 'px; }';
-    }
-    return '';
-  }
-
-  /** 生成整张外观样式表（与 pipCss 同结构：骨架在静态 CSS，这里只给随外观变的部分） */
+  /**
+   * 生成整张外观样式表（与 pipCss 同结构：骨架在静态 CSS，这里只给随外观变的部分）。
+   *
+   * 字号 / 字重 / 行高按 PLAN 063 的手机屏规格固定；style 预设只剩字体栈与描边差异。
+   * 底板（classic 的模糊块、contrast 的行底）不再输出：手机屏是纯色背景，
+   * 背景修饰只会让字更挤，也与「清爽」的目标相反。
+   */
   function appearanceCss(target) {
     const spec = STYLE_SPECS[target.style] || STYLE_SPECS.classic;
-    const base = baseFontPx(target.scale);
-    const primary = isCJK(target.primaryLang) ? base * CJK_FONT_RATIO : base;
-    const secondary = Math.max(MIN_FONT_PX, base * SECONDARY_RATIO);
-    const edge = textEdgeOf(spec, base);
+    const scale = target.scale;
+    const primary = typePx(TYPE_SPEC.primary, scale);
+    const secondary = typePx(TYPE_SPEC.secondary, scale);
+    const context = typePx(TYPE_SPEC.context, scale);
+    const ruby = typePx(TYPE_SPEC.ruby, scale);
+    const edge = textEdgeOf(spec, primary);
     const letterSpacing = spec.letterSpacingEm ? spec.letterSpacingEm + 'em' : 'normal';
-    const secondaryColor = spec.secondaryAlpha < 1
-      ? colorWithAlpha(target.color, spec.secondaryAlpha)
-      : target.color;
+    const primaryColor = target.color;
+    // 译文固定冷色（见 SECONDARY_COLOR 的注释），与原文的纯白拉开色相
+    const secondaryColor = SECONDARY_COLOR;
+    const contextColor = colorWithAlpha(target.color, .4);
 
     const line = (selector, fontLang, size, weight, color) => selector + ' {'
       + ' font-family: ' + fontStackOf(spec, fontLang, target.style) + ';'
-      + ' font-size: ' + round1(size) + 'px;'
+      + ' font-size: ' + size + 'px;'
       + ' font-weight: ' + weight + ';'
       + ' letter-spacing: ' + letterSpacing + ';'
       + ' color: ' + color + ';'
@@ -633,13 +652,15 @@ export function renderPage(room, bootPrefs) {
       + ' paint-order: ' + edge.paintOrder + '; }';
 
     return [
-      plateCss(spec, base),
-      line('#line-primary', target.primaryLang, primary, primaryWeightOf(spec, target.primaryLang), target.color),
-      line('#line-secondary', target.secondaryLang, secondary, spec.secondaryWeight, secondaryColor),
-      line('#prev-primary, #next-primary', target.primaryLang,
-        primary * CTX_FONT_RATIO, primaryWeightOf(spec, target.primaryLang), target.color),
-      line('#prev-secondary, #next-secondary', target.secondaryLang,
-        secondary * CTX_FONT_RATIO, spec.secondaryWeight, secondaryColor),
+      // 当前原文：24px / 600 / 不透明
+      line('#line-primary', target.primaryLang, primary, 600, primaryColor),
+      // 主译文：16px / 400 / 85%
+      line('#line-secondary', target.secondaryLang, secondary, 400, secondaryColor),
+      // 上文 / 下文预览：13px / 400 / 40%
+      line('#prev-primary, #next-primary', target.primaryLang, context, 400, contextColor),
+      line('#prev-secondary, #next-secondary', target.secondaryLang, context, 400, contextColor),
+      // 注音：12px / 400 / 80%（颜色与 4px 间距在静态 CSS 里）
+      '#line-primary rt { font-size: ' + ruby + 'px; }',
     ].join('\\n');
   }
 
@@ -648,7 +669,6 @@ export function renderPage(room, bootPrefs) {
   const stageEl = document.getElementById('stage');
   const linePrimary = document.getElementById('line-primary');
   const lineSecondary = document.getElementById('line-secondary');
-  const klineSecondary = document.getElementById('kline-secondary');
   const prevEl = document.getElementById('prev');
   const nextEl = document.getElementById('next');
   const prevPrimary = document.getElementById('prev-primary');
@@ -656,7 +676,6 @@ export function renderPage(room, bootPrefs) {
   const nextPrimary = document.getElementById('next-primary');
   const nextSecondary = document.getElementById('next-secondary');
   const fillPrimary = document.getElementById('fill-primary');
-  const fillSecondary = document.getElementById('fill-secondary');
   const progressEl = document.getElementById('progress');
   const progressFill = document.getElementById('progress-fill');
   const statusEl = document.getElementById('status');
@@ -665,11 +684,21 @@ export function renderPage(room, bootPrefs) {
   const controlsEl = document.getElementById('controls');
   const playBtn = document.getElementById('playpause');
   const rateBtn = document.getElementById('rate');
+  const rateBadge = document.getElementById('rate-badge');
   const sheetEl = document.getElementById('sheet');
   const styleEl = document.getElementById('appearance');
   const pickerEl = document.getElementById('picker');
   const pickerRows = document.getElementById('picker-rows');
   const pickerTime = document.getElementById('picker-time');
+
+  /**
+   * 播放 / 暂停图标用内联 SVG，不用三角形、双竖线这类字符：
+   * 它们在部分平台会被渲染成彩色 emoji，或者因字体缺失变成方框（PLAN 063 v2）。
+   */
+  const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>';
+  const ICON_PAUSE = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M8 5.5h3.4v13H8zM12.6 5.5H16v13h-3.4z" fill="currentColor"/></svg>';
 
   const room = new URLSearchParams(location.search).get('room') || 'demo';
 
@@ -694,6 +723,8 @@ export function renderPage(room, bootPrefs) {
         ctx: Number.isFinite(value.ctx) ? value.ctx : 1,
         dual: value.dual !== false,
         bar: value.bar !== false,
+        // 分词默认打开（PLAN 064）：段间距是手机屏上唯一的词组边界提示
+        seg: value.seg !== false,
       };
     } catch {
       return null;
@@ -728,6 +759,7 @@ export function renderPage(room, bootPrefs) {
       ctx: Number.isFinite(style.ctxLines) ? style.ctxLines : 1,
       dual: style.dual !== false,
       bar: true,
+      seg: true,
     };
     savePrefs();
   }
@@ -784,16 +816,16 @@ export function renderPage(room, bootPrefs) {
     });
   }
 
-  /** 二维数组 → 节点：外层是文节段（之间插分隔符），内层是 token（可能带注音） */
-  function buildLine(target, segments, sepText) {
+  /**
+   * 二维数组 → 节点：外层是文节段，内层是 token（可能带注音）。
+   *
+   * 段与段之间**不插入任何字符**（PLAN 063 去掉了竖线），只靠 .llg-seg 的
+   * margin-right 表达词组边界 —— 文本流保持连续，复制/选中也不会带出符号。
+   */
+  function buildLine(target, segments) {
     const nodes = [];
-    segments.forEach((seg, index) => {
-      if (index) {
-        const sep = document.createElement('span');
-        sep.className = 'llg-sep';
-        sep.textContent = sepText;
-        nodes.push(sep);
-      }
+    segments.forEach((seg) => {
+      const tokens = [];
       for (const token of seg) {
         if (!token || !token.text) continue;
         if (token.ruby) {
@@ -802,11 +834,16 @@ export function renderPage(room, bootPrefs) {
           const rt = document.createElement('rt');
           rt.textContent = token.ruby;
           ruby.append(rt);
-          nodes.push(ruby);
+          tokens.push(ruby);
         } else {
-          nodes.push(token.text);
+          tokens.push(token.text);
         }
       }
+      if (!tokens.length) return;
+      const group = document.createElement('span');
+      group.className = 'llg-seg';
+      group.replaceChildren(...tokens);
+      nodes.push(group);
     });
     target.replaceChildren(...nodes);
   }
@@ -814,6 +851,8 @@ export function renderPage(room, bootPrefs) {
   function applyPrefs() {
     applyAppearance();
     progressEl.classList.toggle('off', !prefs.bar);
+    // 关掉分词只去掉段间距，文本流本身没变（切点由发送端决定）
+    linePrimary.parentElement.classList.toggle('no-seg', !prefs.seg);
 
     const hasCtx = !!lastPayload;
     renderCtx(prevEl, prevPrimary, prevSecondary,
@@ -821,7 +860,7 @@ export function renderPage(room, bootPrefs) {
     renderCtx(nextEl, nextPrimary, nextSecondary,
       hasCtx && prefs.ctx >= 1 ? lastPayload.next : null);
 
-    klineSecondary.classList.toggle('hidden', lastPayload
+    lineSecondary.classList.toggle('hidden', lastPayload
       ? (lastPayload.style && lastPayload.style.dual === false) || !prefs.dual
         || !lineSecondary.textContent
       : false);
@@ -937,7 +976,8 @@ export function renderPage(room, bootPrefs) {
   }
 
   /**
-   * 每帧刷两条进度：底部整片进度 + 文字背后的句内蓝底。
+   * 每帧刷两条进度：底部整片进度 + 日语原文背后的句内进度（PLAN 063 v3）。
+   * 译文行不铺进度。
    * 用 transform 的 scaleX（合成器动画），不写 width —— 后者每帧都要重新布局。
    */
   function paintProgress() {
@@ -950,6 +990,7 @@ export function renderPage(room, bootPrefs) {
         : videoClock.basePos;
       bar = Math.max(0, Math.min(1, pos / videoClock.duration));
     } else {
+      // 拿不到整片时长（直播 / 元数据还没到）：退回句内进度，至少还有东西在动
       bar = cueValue(now);
     }
     if (Math.abs(bar - lastBarValue) > 0.0005) {
@@ -961,7 +1002,6 @@ export function renderPage(room, bootPrefs) {
     if (Math.abs(fill - lastFillValue) > 0.0005) {
       lastFillValue = fill;
       fillPrimary.style.transform = 'scaleX(' + fill + ')';
-      fillSecondary.style.transform = 'scaleX(' + fill + ')';
     }
 
     requestAnimationFrame(paintProgress);
@@ -990,16 +1030,11 @@ export function renderPage(room, bootPrefs) {
     const cur = payload.cur || {};
     // 手机本地也留一份句子历史：快照没带 cues（旧扩展）时选句浮层靠它兜底
     rememberCue(payload.cue, cur.primary);
-    // 空串是「关闭分隔符」（PLAN 047），不能用 || 兜成竖线
-    const sepText = style.separator ?? '|';
     const key = JSON.stringify(cur.segments || []);
     if (key !== lastCurKey) {
       lastCurKey = key;
-      if (cur.segments && cur.segments.length) buildLine(linePrimary, cur.segments, sepText);
+      if (cur.segments && cur.segments.length) buildLine(linePrimary, cur.segments);
       else linePrimary.replaceChildren();
-      linePrimary.classList.toggle('has-ruby', !!(cur.segments || []).some(
-        (seg) => seg.some((token) => token && token.ruby),
-      ));
     }
     const secondaryText = cur.secondary || '';
     if (lineSecondary.textContent !== secondaryText) lineSecondary.textContent = secondaryText;
@@ -1049,7 +1084,7 @@ export function renderPage(room, bootPrefs) {
       const key = seg.dataset.pref;
       for (const btn of seg.querySelectorAll('button')) {
         const value = btn.dataset.v;
-        const active = key === 'dual' || key === 'bar'
+        const active = key === 'dual' || key === 'bar' || key === 'seg'
           ? (value === '1') === !!prefs[key]
           : String(prefs[key]) === value;
         btn.classList.toggle('active', active);
@@ -1069,6 +1104,7 @@ export function renderPage(room, bootPrefs) {
       else if (key === 'ctx') prefs.ctx = Number(value);
       else if (key === 'dual') prefs.dual = value === '1';
       else if (key === 'bar') prefs.bar = value === '1';
+      else if (key === 'seg') prefs.seg = value === '1';
       savePrefs();
       paintSegs();
       applyPrefs();
@@ -1093,7 +1129,7 @@ export function renderPage(room, bootPrefs) {
     if (open) {
       // 还没收到任何字幕就点开设置：先给一套官方默认，别让 paintSegs 读到 null
       if (!prefs) {
-        prefs = { style: 'classic', scale: 100, color: '#FFFFFF', ctx: 1, dual: true, bar: true };
+        prefs = { style: 'classic', scale: 100, color: '#FFFFFF', ctx: 1, dual: true, bar: true, seg: true };
       }
       paintSegs();
     }
@@ -1158,7 +1194,7 @@ export function renderPage(room, bootPrefs) {
       const next = RATE_STEPS[(index + 1) % RATE_STEPS.length];
       rateNow = next;
       rateHoldUntil = performance.now() + 2000;
-      rateBtn.textContent = fmtRate(next);
+      rateBadge.textContent = fmtRate(next);
       sendControl('rate', next);
     } else if (action === 'skip') {
       sendControl('skip', Number(btn.dataset.v));
@@ -1167,12 +1203,19 @@ export function renderPage(room, bootPrefs) {
     }
   });
 
-  /** 用快照回显：暂停态显示 ▶，倍速显示 Mac 上的真实值（Mac 上改也会同步过来） */
+  /** 用快照回显：暂停态显示播放图标，倍速显示 Mac 上的真实值（Mac 上改也会同步过来） */
   function paintControls(payload) {
-    playBtn.textContent = payload.playing === false ? '▶' : '❚❚';
+    const paused = payload.playing === false;
+    const icon = paused ? 'play' : 'pause';
+    // 幂等：同一状态不重写 innerHTML（AGENTS.md §3）
+    if (playBtn.dataset.icon !== icon) {
+      playBtn.dataset.icon = icon;
+      playBtn.innerHTML = paused ? ICON_PLAY : ICON_PAUSE;
+    }
     const rate = Number(payload.rate);
     if (Number.isFinite(rate) && rate > 0 && performance.now() > rateHoldUntil) rateNow = rate;
-    rateBtn.textContent = fmtRate(rateNow);
+    const shownRate = fmtRate(rateNow);
+    if (rateBadge.textContent !== shownRate) rateBadge.textContent = shownRate;
   }
 
   // ================================================================ 上下滑动选句（PLAN 045）
@@ -1198,6 +1241,13 @@ export function renderPage(room, bootPrefs) {
   let pickStartY = 0;
   let pickTravel = 0;
   let pickTimer = 0;
+  /**
+   * 本段触摸落在设置面板 / 控制条里：整段手势都不归选句管。
+   *
+   * 光在 touchstart 里 return 不够 —— touchmove 读的是**上一次**留下的 pickStartY，
+   * 在设置页里轻轻一滑，dy 会是一个很大的值，直接翻句并 seek（PLAN 064）。
+   */
+  let pickBlocked = false;
 
   function rememberCue(cue, primary) {
     const start = Number(cue && cue.start);
@@ -1264,8 +1314,14 @@ export function renderPage(room, bootPrefs) {
   }
 
   function onPickStart(ev) {
+    pickBlocked = false;
     if (!ev.touches || ev.touches.length !== 1) return;
     const y = ev.touches[0].clientY;
+    // 设置面板 / 控制条里的滑动（滑块、列表滚动）交给它们自己，不能变成选句
+    if (ev.target && ev.target.closest && ev.target.closest('#controls, #gear, #sheet')) {
+      pickBlocked = true;
+      return;
+    }
     if (pickerOpen) {
       // 浮层里继续换句：以当前选中为基准重新算
       pickStartY = y;
@@ -1273,12 +1329,12 @@ export function renderPage(room, bootPrefs) {
       pickTravel = 0;
       return;
     }
-    if (ev.target && ev.target.closest && ev.target.closest('#controls, #gear, #sheet')) return;
     pickStartY = y;
     pickTravel = 0;
   }
 
   function onPickMove(ev) {
+    if (pickBlocked) return;
     if (!ev.touches || ev.touches.length !== 1) return;
     const dy = ev.touches[0].clientY - pickStartY;
     if (!pickerOpen) {
@@ -1300,6 +1356,10 @@ export function renderPage(room, bootPrefs) {
   }
 
   function onPickEnd() {
+    if (pickBlocked) {
+      pickBlocked = false;
+      return;
+    }
     if (!pickerOpen) return;
     // 只滑了一点点就松手：当误触，关掉不跳
     if (Math.abs(pickTravel) < PICK_ROW_PX / 2) {
@@ -1317,6 +1377,7 @@ export function renderPage(room, bootPrefs) {
   document.addEventListener('touchmove', onPickMove, { passive: false });
   document.addEventListener('touchend', onPickEnd, { passive: true });
   document.addEventListener('touchcancel', () => {
+    pickBlocked = false;
     if (pickerOpen) closePicker();
   });
 
