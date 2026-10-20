@@ -3,6 +3,7 @@
   "version": "1.12.4",
   "private": true,
   "description": "Chrome extension that adds a desktop subtitle window, mobile subtitle display, a study panel and Japanese phrase segmentation to Linglass.",
+  "license": "MIT",
   "engines": {
     "node": ">=18"
   },

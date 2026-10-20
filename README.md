@@ -205,3 +205,9 @@ Linglass-Pro/
 - 需求与设计记录存放于 [`docs/plans/`](docs/plans)。
 - 修改 `src/mod/**` 时需运行 `make build`、`make test` 与 `make check`。
 - 仓库不引入第三方依赖。
+
+## 许可证
+
+本仓库代码采用 MIT 许可证，见 [LICENSE](LICENSE)。
+
+`vendor/` 下的 Linglass 产物归其权利人所有，不适用本许可证。
