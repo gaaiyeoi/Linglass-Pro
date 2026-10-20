@@ -69,13 +69,6 @@
   const MAX_CUE_SECONDS = 20;
   /** 重看同一段时判定「同一句」的时间容差 */
   const DEDUPE_WINDOW_SECONDS = 2.5;
-  /**
-   * 判定「同一句分步上屏」的相邻采样窗口（PLAN 053）。
-   *
-   * 官方同一句常常先给半句、再补全（「あの」→「あの、そうですね」）。两次采样通常只隔
-   * 零点几秒，用与去重同量级的窗口足够；放大到几秒会把真正相邻的两句也吞成一句。
-   */
-  const FRAGMENT_WINDOW_SECONDS = 2.5;
 
   /**
    * 单个视频最多保留多少句（PLAN 025）。
@@ -170,13 +163,6 @@
   let videoRef = null;
   let lastKey = null;
   let lastTickTime = null;
-  /**
-   * 上一次 capture() 的时刻（PLAN 053）。
-   *
-   * 与 lastTickTime 分开：那个只在「正常播放前进」时才更新，暂停或刚跳转时会停住；
-   * 判断「同一句分步上屏」要的是「两次采样之间隔了多久」，暂停时补全文本也必须算同一句。
-   */
-  let lastCaptureTime = null;
   let saveTimer = 0;
   let loading = false;
 
@@ -797,40 +783,6 @@
   }
 
   /**
-   * 同一句的「分步上屏」：官方先给半句、再补全（PLAN 053）。
-   *
-   * 不合并的话，每一步都会被当成新句：浮窗只显示半句，句内进度的分母也跟着半句走
-   * （播到半句就回零）。判据刻意保守 —— 只在「新文本是旧文本的延长（或反过来）」
-   * 且相邻采样够近时合并。真正相邻的两句若恰好互为前缀（「はい」→「はい、そうです」）
-   * 会被吞成一句，这是已知取舍：宁可整句长一点，也不要把一句话拆成两截显示。
-   *
-   * 骨架句不参与：官方整条轨里的句子本身就是权威整句，不能被采样到的半句改写。
-   */
-  function absorbFragment(lines, t) {
-    if (!active) return false;
-    // 整轨被导入文件替换过（PLAN 052）→ 句子结构以文件为准，采样不许改写
-    if (manualTrack) return false;
-    if (officialCues.has(active)) return false;
-    if (t != null && lastCaptureTime != null && t - lastCaptureTime > FRAGMENT_WINDOW_SECONDS) {
-      return false;
-    }
-
-    const prev = normalizeText(active.primary);
-    const next = normalizeText(lines.primary);
-    if (!prev || !next) return false;
-
-    const grows = next.startsWith(prev);
-    const shrinks = prev.startsWith(next);
-    if (!grows && !shrinks) return false;
-
-    if (grows) active.primary = lines.primary;
-    // 导入的译文优先（PLAN 031），采样不许覆盖它
-    if (lines.secondary && active.origin !== 'imported') active.secondary = lines.secondary;
-    scheduleSave();
-    return true;
-  }
-
-  /**
    * 采样一次字幕状态。字幕空档期不建句，只收尾。
    * 每次「换了新的一句」都通知订阅者 —— 桌面字幕靠它做到零延迟跟读，
    * 不必等下一个心跳。
@@ -847,23 +799,14 @@
 
     if (key === lastKey) {
       extendActive();
-      lastCaptureTime = t;
       return;
     }
     lastKey = key;
-
-    // 同一句在补全：并入当前句，不新建、不重放换句（PLAN 053）
-    if (lines && absorbFragment(lines, t)) {
-      lastCaptureTime = t;
-      notify();
-      return;
-    }
 
     closeActive();
     // 骨架的重试不挂在这里：逐词高亮会让 capture 一秒触发好几次，次数会被刷爆
     // （见 heartbeat 的调用点）
     if (lines && (lines.primary || lines.secondary)) openCue(lines);
-    lastCaptureTime = t;
     notify();
   }
 
@@ -1157,12 +1100,7 @@
     // 与 1s 心跳维护，换行那一刻就是新的。
     const lines = lastLines;
     if (!lines || !lines.primary) return true;
-    // 画面与轨道「同一句」的判据是互为前缀，不是完全相等（PLAN 053）：
-    // 轨道里的这句可能已经被合并成整句，而画面上官方还在分步上屏（半句是它的前缀）。
-    // 只认前缀关系仍然能挡住「时间轴落在上一句」的陈旧状态 —— 那种情况两边毫无前缀关系。
-    const live = lines.primary;
-    const trackText = primary || '';
-    return live === trackText || trackText.startsWith(live) || live.startsWith(trackText);
+    return lines.primary === (primary || '');
   }
 
   function getProgress() {

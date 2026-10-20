@@ -1434,29 +1434,10 @@ body { background: var(--llg-glass-${glass}); }
 
   // ---------------------------------------------------------------- 文案渲染
 
-  /**
-   * 这一屏要显示的原文：优先用**轨道里的整句**，而不是官方当前这一截半句（PLAN 053）。
-   *
-   * 官方同一句分步上屏时，画面上的文本只是整句的前缀。轨道（骨架 / 合并后的采样句）
-   * 才有完整的一句，所以前缀关系成立就用整句 —— 这会让这一句比语音略早显示完。
-   * 反过来不成立时（刚换句、轨道还停在上一句）一律以画面为准，避免把上一句顶上屏。
-   * 空档期（画面没有原文）也以画面为准：不硬塞轨道句。
-   */
-  function wholePrimary(live, complete) {
-    const shown = live || '';
-    const sentence = complete || '';
-    if (!shown || !sentence) return shown;
-    return sentence.startsWith(shown) ? sentence : shown;
-  }
-
   function currentLines() {
     const lines = track.readLines();
     if (!lines) return { primary: '', secondary: '' };
-    const current = typeof track.getCurrent === 'function' ? track.getCurrent() : null;
-    return {
-      primary: wholePrimary(lines.primary, current && current.primary),
-      secondary: lines.secondary,
-    };
+    return { primary: lines.primary, secondary: lines.secondary };
   }
 
   /**

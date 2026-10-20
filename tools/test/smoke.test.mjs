@@ -1137,27 +1137,6 @@ test('字幕轨道：重看同一段不重复收录', async () => {
   assert.equal(track.getCues()[0].start, 5, '应复用原来那句，而不是新建在 5.2');
 });
 
-/**
- * PLAN 053 的回归：官方同一句是**分步上屏**的（先半句、再补全）。
- *
- * 旧实现按整行文本当换句判据，于是每一步都新建一条 start 几乎相同的 cue；
- * 浮窗只显示半句，句内进度的分母也只有半句。现在必须并回同一条。
- */
-test('字幕轨道：同一句分步上屏合并成一条完整句', async () => {
-  const { h, track } = await harness();
-
-  h.currentTime = 5;
-  show(h, 'あの', '那个');
-  h.currentTime = 5.3;
-  show(h, 'あの、そうですね', '那个，是啊');
-
-  const cues = track.getCues();
-  assert.equal(cues.length, 1, '同一句的补全不许拆成多条');
-  assert.equal(cues[0].start, 5, 'start 保持第一次出现的时间');
-  assert.equal(cues[0].primary, 'あの、そうですね', '轨道里存的是完整句');
-  assert.equal(cues[0].secondary, '那个，是啊', '译文跟着补全');
-});
-
 test('字幕轨道：字幕空档期只收尾、不建空句', async () => {
   const { h, track } = await harness();
 
@@ -3250,33 +3229,6 @@ test('桌面字幕：浮窗进度条按新的分母走', async () => {
   assert.equal(h.pipFill(), 'scaleX(0.5)', '3 / 6，而不是旧实现的 100%');
 });
 
-/**
- * PLAN 053：一句只显示整句，且进度按整句算。
- *
- * 画面还停在半句时，轨道已经把同一句补全了 —— 浮窗直接用整句；
- * 进度判据也不能再把「轨道整句 vs 画面半句」当成不同步而返回 0。
- */
-test('桌面字幕：同一句分步上屏时提前显示整句，句内进度按整句走', async () => {
-  const { h } = await harness({ withPip: true });
-  h.jaBreakEnabled = false;
-
-  h.currentTime = 5;
-  show(h, 'あの', '');
-  h.gesture();
-  await h.drain();
-  assert.equal(h.pipText(), 'あの');
-
-  h.currentTime = 5.4;
-  show(h, 'あの、そうですね', '');
-  await h.drain();
-  assert.equal(h.pipText(), 'あの、そうですね', '画面只有半句时，浮窗也要给出整句');
-
-  h.tick();
-  const fill = h.pipFill();
-  const ratio = Number(/scaleX\(([\d.]+)\)/.exec(fill)[1]);
-  assert.ok(ratio > 0, `进度不该被半句判成 0（实际 ${fill}）`);
-});
-
 // ---------------------------------------------------------------- 浮窗上下滑动选句
 
 /** 在浮窗里滚一格（deltaY 像素）；返回事件对象，便于断言有没有 preventDefault */
@@ -3500,36 +3452,6 @@ test('桌面字幕：档位拉到 2 时上一句也显示，并带上它刚采�
   assert.equal(pip.contextText(-1).primary, 'おはよう');
   assert.equal(pip.contextText(1).secondary, '');
   assert.equal(pip.contextText(-99), null);
-});
-
-/**
- * PLAN 053：用户要求「上一句 / 下一句也必须是完整句」。
- * 上一句曾经是半句时，合并后的轨道句应该完整地出现在上下文行里。
- */
-test('桌面字幕：合并后的整句会作为完整的上一句出现', async () => {
-  const { h } = await harness({
-    withPip: true,
-    settings: APPEARANCE,
-    stored: {
-      llgPipAppearance: { style: 'classic', scale: 100, color: '#FFFFFF', dual: true, ctxLines: 2 },
-    },
-  });
-  h.jaBreakEnabled = false;
-  await h.drain();
-
-  h.currentTime = 5;
-  show(h, 'あの', '');
-  h.currentTime = 5.3;
-  show(h, 'あの、そうですね', '');
-  h.currentTime = 9;
-  show(h, '次の句です', '');
-  await h.drain();
-
-  h.gesture();
-  await h.drain();
-
-  assert.equal(h.pipText(), '次の句です');
-  assert.equal(h.pipLineText('prev-primary'), 'あの、そうですね', '上一句必须是整句，不能停在半句');
 });
 
 test('桌面字幕：上下文行循环 0/1/2 并落盘，0 时两段都收起来', async () => {
