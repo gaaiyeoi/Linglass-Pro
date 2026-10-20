@@ -59,6 +59,13 @@ test('手机接收页：上滑选句浮层存在，并发 seek 命令（PLAN 045
   assert.ok(html.includes('onPickStart'), '触摸手势已接线');
 });
 
+test('手机接收页：句内进度按画面换句重置，不被时间轴的 0 拽回去（PLAN 062）', () => {
+  const html = renderPage('demo', null);
+  assert.ok(html.includes('cueClock.text'), '换句依据是画面文本，不是时间轴句');
+  assert.ok(html.includes('progress == null'), '缺失进度（不可信）时保持本地推进');
+  assert.ok(html.includes('const rawProgress = payload.progress'), 'null 不能被折成 0');
+});
+
 test('手机接收页：控制条有播放/暂停、±5 秒、倍速四个按钮（PLAN 042）', () => {
   const html = renderPage('demo', null);
   assert.ok(html.includes('id="controls"'), '控制条存在');

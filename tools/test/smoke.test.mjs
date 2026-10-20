@@ -1121,6 +1121,30 @@ test('字幕轨道：画面上的振假名不会让进度误判成 0', async () 
   );
 });
 
+/**
+ * PLAN 062：手机字幕屏要能区分「这一拍不可信」与「这句刚开头」。
+ *
+ * `getProgress()` 的 0 在浮窗 / 面板那里表示「空着」；手机端却拿它当本地时钟的
+ * 基准，折成 0 就会被读成「从头开始」，把正在走的句内进度拽回句首。
+ */
+test('字幕轨道：画面与时间轴不一致时，getProgressOrNull 为 null（0 只表示句首）', async () => {
+  const { h, track } = await harness();
+
+  h.currentTime = 10;
+  show(h, 'あ', '');
+  h.currentTime = 12;
+  show(h, 'い', ''); // 第一句定稿 10→12
+
+  // 时间轴回到第一句，但画面仍显示第二句：两者不是同一句
+  h.currentTime = 11;
+  assert.equal(track.getProgress(), 0, '旧入口保持原语义：不可信时画 0（空着）');
+  assert.equal(track.getProgressOrNull(), null, '新入口必须能把「不可信」与 0 分开');
+
+  // 画面同步回第一句：11s 处于 10→12 的中点
+  show(h, 'あ', '');
+  assert.equal(track.getProgressOrNull(), 0.5, '两端一致时要给出正常进度');
+});
+
 test('字幕轨道：重看同一段不重复收录', async () => {
   const { h, track } = await harness();
 

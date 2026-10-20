@@ -152,6 +152,19 @@
   }
 
   /**
+   * 快照里的句内进度：**不可信时是 `null`**（时间轴与画面句还没对齐）。
+   *
+   * 不能退回 0：手机端拿它当句内时钟的基准，0 意味着「这句从头开始」，
+   * 而这里 0 的真实含义是「不知道」—— 见 PLAN 062。旧版 track 没有这个入口时
+   * 退回 `getProgress()`，保证扩展与内容脚本不同版本时整帧字段不缺失。
+   */
+  function progressOf() {
+    if (!track) return null;
+    if (typeof track.getProgressOrNull === 'function') return track.getProgressOrNull();
+    return typeof track.getProgress === 'function' ? track.getProgress() : null;
+  }
+
+  /**
    * 构建一帧快照。字段与 tools/cast-page.mjs 的渲染一一对应：
    *   cue/progress  整句进度；cur.segments 二维数组（段 → token，token 可能带 ruby）
    *   prev/next     上下文原文；style 官方外观 + 浮窗自己的 ctxLines
@@ -190,7 +203,7 @@
       cue: current
         ? { start: Number(current.start) || 0, end: Number(current.end) || 0 }
         : null,
-      progress: typeof track.getProgress === 'function' ? track.getProgress() : 0,
+      progress: progressOf(),
       cur: {
         primary: lines.primary,
         segments: lines.segments,
@@ -240,7 +253,7 @@
     const lines = track && typeof track.readLines === 'function' ? track.readLines() : null;
     const official = pip && typeof pip.official === 'function' ? pip.official() : {};
     const own = pip && typeof pip.pipOption === 'function' ? pip.pipOption() : {};
-    const progress = track && typeof track.getProgress === 'function' ? track.getProgress() : 0;
+    const progress = progressOf();
     const jaBreak = globalThis.__llgModJaBreak;
     const v = video();
 
@@ -262,7 +275,8 @@
       v ? (v.paused ? 1 : 0) : 0,
       v ? Number(v.playbackRate) || 1 : 1,
       v && Number.isFinite(v.duration) && v.duration > 0 ? Math.round(v.currentTime * 2) : 0,
-      Math.round((Number(progress) || 0) * 200),
+      // null（不可信）与 0（句首）必须是两个不同的键，否则换句那一拍会被去重掉
+      progress == null ? 'n' : Math.round(progress * 200),
     ].join('\u0001');
   }
 

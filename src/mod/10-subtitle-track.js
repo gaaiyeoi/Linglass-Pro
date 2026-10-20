@@ -1103,18 +1103,31 @@
     return lines.primary === (primary || '');
   }
 
-  function getProgress() {
+  /**
+   * 「此刻这句播到哪了」（0–1）；时间轴与画面句对不上时返回 `null`。
+   *
+   * `null` 与 `0` 是两件事：前者是「不可信」，后者是「这句刚开头」。
+   * 浮窗 / 侧边面板的进度条在不可信时**空着**（PLAN 009：宁可空着也不画假的满格），
+   * 所以 `getProgress()` 继续把 `null` 折成 0；但手机字幕屏拿它当本地时钟的基准，
+   * 折成 0 就会被读成「从头开始」，把正在走的句内进度拽回句首（PLAN 062）。
+   */
+  function progressValue() {
     const t = currentTime();
     const index = indexAt(t);
-    if (t == null || index < 0) return 0;
+    if (t == null || index < 0) return null;
     // 画面上的这句跟时间轴里那句不是同一句 → 时间轴落后了（扩展加载晚、
     // 用户拖到了没记录过的区间）。这时候算出来的分母早就过去了，夹一下就是
     // 一个假的 100%：宁可空着也不画。
-    if (!onTimeline(cues[index].primary)) return 0;
+    if (!onTimeline(cues[index].primary)) return null;
     const start = cues[index].start;
     const span = progressEnd(cues[index], cues[index + 1] ?? null) - start;
-    if (!(span > 0)) return 0;
+    if (!(span > 0)) return null;
     return Math.max(0, Math.min(1, (t - start) / span));
+  }
+
+  function getProgress() {
+    const value = progressValue();
+    return value == null ? 0 : value;
   }
 
   /** 导出用：全部句子，end 已补齐，空句已剔除 */
@@ -1307,6 +1320,8 @@
     getCues: () => cues,
     getCurrent,
     getProgress,
+    // 与 getProgress() 同义，但「时间轴与画面句不一致」时返回 null 而不是 0（PLAN 062）
+    getProgressOrNull: progressValue,
     getProgressEnd,
     getCuesForExport: finalizedCues,
     // importMismatch 是内存里的比对结果（不落盘），面板靠它决定要不要提示

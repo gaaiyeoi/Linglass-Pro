@@ -755,6 +755,8 @@ export function renderPage(room, bootPrefs) {
   let videoClock = { active: false, playing: false, baseMs: 0, basePos: 0, duration: 0 };
   let cueClock = {
     active: false, playing: false, baseMs: 0, baseProgress: 0, duration: 0, start: null,
+    /** 画面上的那句原文：换句只认它（见 syncClocks 的注释） */
+    text: '',
   };
   let lastBarValue = -1;
   let lastFillValue = -1;
@@ -840,8 +842,16 @@ export function renderPage(room, bootPrefs) {
    *
    * 偏差小于阈值时**不重设**：本地时钟本来就更平滑，每 250ms 把基准拽回去
    * 反而会在进度条上看到一次次微小回跳。超过阈值（拖动 / 卡顿 / 重连）才认推送为准。
+   *
+   * 句内这条额外守一条规矩（PLAN 062）：**换句只认画面文本**（text），不跟
+   * payload.cue 的时间轴走。换句那一拍两个来源必然错开，而 progress 在错开时
+   * 是 null（getProgressOrNull()）—— 以前把它折成 0 当基准，于是每句快结束时
+   * 句内进度都被拽回句首重走，看起来「永远走不完」。
+   *
+   * @param {number|null} progress 不可信时为 null
+   * @param {string} text 画面上的那句原文（换句依据）
    */
-  function syncClocks(payload, progress, now) {
+  function syncClocks(payload, progress, text, now) {
     const playing = payload.playing !== false;
     const timeline = payload.timeline;
 
@@ -863,30 +873,58 @@ export function renderPage(room, bootPrefs) {
 
     const cue = payload.cue;
     const cueDuration = cue && cue.end > cue.start ? cue.end - cue.start : 0;
-    if (cueDuration > 0) {
-      const est = cueClock.active && cueClock.playing
-        ? cueClock.baseProgress + (now - cueClock.baseMs) / 1000 / cueDuration
-        : null;
-      // 阈值按「秒」比，不按进度比：进度是 0–1，直接比 0.5 等于半句，形同没校验
-      const drifted = est === null || Math.abs(est - progress) * cueDuration > 0.5
-        || cueClock.duration !== cueDuration || cueClock.start !== cue.start;
-      if (drifted) {
-        cueClock = {
-          active: true, playing, start: cue.start, duration: cueDuration,
-          baseMs: now, baseProgress: progress,
-        };
-      } else if (cueClock.playing !== playing) {
-        cueClock = {
-          active: true, playing, start: cue.start, duration: cueDuration,
-          baseMs: now, baseProgress: est,
-        };
-      }
-    } else {
+
+    // 画面换句（含空档、第一次收到字幕）：这一帧就是新句的起点。这里**不用 progress**
+    // —— 换句窗口里它可能是上一句的尾巴、也可能是 null，都不是这一句的起点。
+    if (!cueClock.active || cueClock.text !== text) {
       cueClock = {
-        active: false, playing, start: cue.start, duration: 0,
-        baseMs: now, baseProgress: progress,
+        active: cueDuration > 0, playing, start: cue ? cue.start : null,
+        duration: cueDuration, baseMs: now, baseProgress: 0, text,
       };
+      return;
     }
+
+    // 同一句但时间轴没给出句时长：保持本地估值，别归零
+    if (!(cueDuration > 0)) {
+      cueClock = {
+        active: false, playing, start: cue ? cue.start : null, duration: 0,
+        baseMs: now, baseProgress: cueValue(now), text,
+      };
+      return;
+    }
+
+    // 时间轴跑到了别的句子，而画面还停在这句：整帧不碰时钟。
+    // （反过来画面先换句的情形已在上面的文本分支处理。）
+    if (cueClock.start !== cue.start) return;
+
+    // 活跃句的 end 会被一路推到播放位置：分母变长时保持已走的比例不动
+    if (cueClock.duration !== cueDuration) {
+      cueClock = {
+        active: true, playing, start: cue.start, duration: cueDuration,
+        baseMs: now, baseProgress: cueValue(now), text,
+      };
+      return;
+    }
+
+    if (cueClock.playing !== playing) {
+      cueClock = {
+        active: true, playing, start: cue.start, duration: cueDuration,
+        baseMs: now, baseProgress: cueValue(now), text,
+      };
+      return;
+    }
+
+    // 这一帧没有可信进度（时间轴与画面句还没对齐）：保持本地推进
+    if (progress == null) return;
+
+    const est = cueValue(now);
+    // 阈值按「秒」比，不按进度比：进度是 0–1，直接比 0.5 等于半句，形同没校验
+    const drift = Math.abs(est - progress) * cueDuration;
+    if (drift <= 0.5) return;
+    // 只补「本地落后」，回退一律忽略：句内进度条不回跳，换句由文本分支负责重置
+    if (progress < est) return;
+
+    cueClock = { ...cueClock, baseMs: now, baseProgress: progress };
   }
 
   /** 句内进度（0–1）：有句时长就按本地时钟推，没有就停在推送值 */
@@ -973,9 +1011,11 @@ export function renderPage(room, bootPrefs) {
 
     applyPrefs();
 
-    // 两条进度都交给本地时钟插值（paintProgress 每帧刷），这里只重设基准
-    const progress = Math.max(0, Math.min(1, Number(payload.progress) || 0));
-    syncClocks(payload, progress, performance.now());
+    // 两条进度都交给本地时钟插值（paintProgress 每帧刷），这里只重设基准。
+    // progress 缺失（null）= 扩展说「这一拍不可信」，不能折成 0（PLAN 062）
+    const rawProgress = payload.progress;
+    const progress = Number.isFinite(rawProgress) ? Math.max(0, Math.min(1, rawProgress)) : null;
+    syncClocks(payload, progress, cur.primary || '', performance.now());
 
     paintControls(payload);
     setStatus(payload.playing === false ? '已暂停' : '已连接', true);
