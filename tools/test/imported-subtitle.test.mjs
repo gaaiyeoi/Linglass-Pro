@@ -1,5 +1,5 @@
 /**
- * 导入译文覆盖画面译文行（PLAN 050）的用例。
+ * 导入译文覆盖画面译文行（PLAN 061）的用例。
  *
  * 这个模块只碰官方字幕 shadowRoot 里的 `.subtitle-secondary`，不依赖 chrome.*，
  * 所以喂一个假 shadowRoot + 假轨道就能跑；官方主轨与浮窗不在这里测。

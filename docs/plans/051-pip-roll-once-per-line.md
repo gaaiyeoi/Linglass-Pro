@@ -29,7 +29,7 @@ lastCueIndex = index;
 - `roll()` 只在 `index` 变化时调用，`#reel` 的 `data-roll` 一改就从头播一次动画；
 - 有骨架（`officialCues`）时 `openCue()` 会 `matchOfficial()` 命中骨架句、不新建，
   所以这条路径只在**骨架尚未采用 / 官方没写缓存**的视频上出现 —— 与本机实测
-  （PLAN 049：部分视频的 `:primary` 缓存缺失）相符；
+  （PLAN 060：部分视频的 `:primary` 缓存缺失）相符；
 - 主句文字本身是对的（`currentLines()` 实时读官方 Shadow DOM），所以现象是
   「文字没问题、位置在抖」。
 

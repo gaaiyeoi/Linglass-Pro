@@ -843,7 +843,7 @@ async function harness({
   };
 
   /**
-   * 模拟官方往 chrome.storage.local 写了东西（PLAN 049：骨架靠这个事件采用）。
+   * 模拟官方往 chrome.storage.local 写了东西（PLAN 060：骨架靠这个事件采用）。
    * 桩件里的 `h.stored` 要由调用方自己先写，事件只负责通知。
    */
   h.emitLocal = (changes) => {
@@ -1623,7 +1623,7 @@ test('字幕轨道：索引里暂时没有本视频时，官方稍后写入仍�
 });
 
 /**
- * PLAN 049 的根因（本机实测）：`RYlmJUAIGtM` 的官方缓存比页面打开晚约 100 秒才写入，
+ * PLAN 060 的根因（本机实测）：`RYlmJUAIGtM` 的官方缓存比页面打开晚约 100 秒才写入，
  * 而轮询窗口只有 60 次心跳 —— 窗口一过 `done=true`，骨架从此永远读不到，
  * 面板与导出自始至终只有播放过的句子。
  */
@@ -2796,7 +2796,7 @@ test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async (
   // ≈ 250px（内容 ≈ 202 + PLAN 038 的 48px 呼吸位）
   const fit = h.pip.lastOptions;
   assert.ok(fit.height > 220 && fit.height < 300, `默认高度要贴合内容，实际 ${fit.height}`);
-  // PLAN 045：860 → 1040（长难句少折一行）
+  // PLAN 059：860 → 1040（长难句少折一行）
   assert.ok(fit.width >= 1020 && fit.width < 1100, `默认宽度 1040，实际 ${fit.width}`);
 
   // 字号不跟窗口走 → 窗口就得跟字号走：150% 档那次开窗必须明显更高
@@ -2829,7 +2829,7 @@ test('桌面字幕：开窗尺寸贴合内容，不再写死 1000×264', async (
   );
 });
 
-test('桌面字幕：长句按日文禁则断行，并尽量让两行一样长（PLAN 045）', async () => {
+test('桌面字幕：长句按日文禁则断行，并尽量让两行一样长（PLAN 059）', async () => {
   const { h } = await harness({ withPip: true, settings: APPEARANCE });
   await h.drain();
   h.gesture();
@@ -3010,7 +3010,7 @@ test('桌面字幕：官方亮色面板 CSS 转成暗色，投影与白字不动
 });
 
 /**
- * PLAN 041：`svgIcon()` 只写 viewBox、不写 width/height 属性，尺寸只能由 CSS 给。
+ * PLAN 056：`svgIcon()` 只写 viewBox、不写 width/height 属性，尺寸只能由 CSS 给。
  * 官方的尺寸规则只在「用户先打开过官方面板」时才拷得到，取不到就走兜底 ——
  * 那时任何一个漏了尺寸的图标都会按 300×150 渲染，把整行撑爆（截图里的巨型箭头）。
  * 所以断言：凡是交给 svgIcon 的类，PANEL_CSS 里必须有 width/height。
@@ -3107,7 +3107,7 @@ test('桌面字幕：Aa 只负责打开设置，连点两次不会收起面板',
   h.pipClick('appearance');
   assert.equal(pip.barMode(), 'root');
 
-  // 旧语义是切换：第二次点击会把面板收起来，用户看到「回到浮窗初始界面」（PLAN 036）
+  // 旧语义是切换：第二次点击会把面板收起来，用户看到「回到浮窗初始界面」（PLAN 055）
   h.pipClick('appearance');
   assert.equal(pip.barMode(), 'root', '连点 Aa 不收起面板');
   assert.equal(h.pipButton('settings').style.display, '', '设置页仍然显示');

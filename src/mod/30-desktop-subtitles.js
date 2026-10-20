@@ -105,7 +105,7 @@
    * PLAN 038：700 → 860。默认窗口偏窄时，长句换行频繁、控制栏也挤；860 大约能放下
    * 一行 30 个日文字符，仍不是「越宽越好」。
    *
-   * PLAN 045：860 → 1040。日语难度调高后长句更长，860 仍会把 40 字左右的句子折成两行。
+   * PLAN 059：860 → 1040。日语难度调高后长句更长，860 仍会把 40 字左右的句子折成两行。
    * 1040 在 100% 档下约 37 个日文字符（1040 − 32 内边距 / 27px），折行明显减少；
    * 再宽就会在 1080p 屏幕上被系统钳制，而且左右黑边开始显眼。
    */
@@ -963,7 +963,7 @@ html, body { height: 100%; margin: 0; overflow: hidden;
   border-radius: var(--llg-r-sm); }
 #fill-primary { background: var(--llg-accent-soft); }
 #fill-secondary { background: var(--llg-accent-softer); }
-/* 长句折行（PLAN 045）：line-break: strict 按日文禁则断行（不让小假名 / 开括号 / 标点
+/* 长句折行（PLAN 059）：line-break: strict 按日文禁则断行（不让小假名 / 开括号 / 标点
    落在行首）；balance 让折两行时长度接近，而不是「第一行满、第二行两个字」 */
 #line-primary, #line-secondary { position: relative; display: block;
   line-height: 1.3; text-align: center; white-space: pre-wrap;
@@ -2061,7 +2061,7 @@ body { background: var(--llg-glass-${glass}); }
 
     switch (act) {
       // 只负责「打开设置」：旧写法是切换，连点两下会先开面板、再把它收起 ——
-      // 用户看到的是「浮窗莫名其妙回到初始界面」（PLAN 036）。
+      // 用户看到的是「浮窗莫名其妙回到初始界面」（PLAN 055）。
       // 收起统一走面板自己的 ×（settings-close），这里不再兼作出口。
       case 'appearance':
         if (barMode === 'play') openPanel('root');
@@ -2378,7 +2378,7 @@ body { background: var(--llg-glass-${glass}); }
   display: flex; flex-direction: column;
   /* 与浮窗同一层玻璃：面板不再是浮在暗窗口里的白卡片（PLAN 047） */
   background: transparent; }
-/* ---- 图标尺寸（PLAN 041）----
+/* ---- 图标尺寸（PLAN 056）----
    svgIcon() 只写 viewBox，不写 width/height 属性，尺寸只能由 CSS 给。官方的尺寸规则写在
    拷来的那份 CSS 里，而那份 CSS 只在「用户先打开过官方面板」时才拷得到 —— 取不到就走兜底，
    于是这些 <svg> 按替换元素默认的 300×150 渲染（截图里的巨型箭头就是它把整行撑爆）。
